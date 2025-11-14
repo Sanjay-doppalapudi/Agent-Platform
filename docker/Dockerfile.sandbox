@@ -1,0 +1,99 @@
+# Secure Python sandbox environment for agent code execution
+# This Dockerfile creates a minimal, hardened environment for running
+# untrusted code with security constraints.
+
+FROM python:3.11-slim
+
+LABEL maintainer="agent-platform"
+LABEL description="Secure sandbox for agent code execution"
+
+# ============================================================================
+# Security: Update system packages
+# ============================================================================
+# Install minimal required tools and remove package lists to reduce attack surface
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    # Essential utilities
+    ca-certificates \
+    && \
+    # Clean up to reduce image size
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# ============================================================================
+# Security: Create non-root user
+# ============================================================================
+# Running as non-root prevents privilege escalation attacks
+# UID 1000 is standard for first user in most Linux distributions
+RUN useradd -m -u 1000 -s /bin/bash sandbox && \
+    # Create workspace directory with proper ownership
+    mkdir -p /workspace && \
+    chown -R sandbox:sandbox /workspace
+
+# ============================================================================
+# Security: Remove unnecessary binaries
+# ============================================================================
+# Remove package managers to prevent installation of additional software
+# This limits what malicious code can do inside the container
+RUN rm -f /usr/local/bin/pip* \
+    /usr/local/bin/easy_install* \
+    /usr/bin/apt* \
+    /usr/bin/dpkg* && \
+    # Remove other potentially dangerous utilities
+    find /usr/bin -name '*wget*' -delete && \
+    find /usr/bin -name '*curl*' -delete
+
+# ============================================================================
+# Environment Configuration
+# ============================================================================
+# Set working directory
+WORKDIR /workspace
+
+# Python configuration
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONPATH=/workspace \
+    # Security: Disable pip version check
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    # Security: Don't cache downloaded packages
+    PIP_NO_CACHE_DIR=1
+
+# ============================================================================
+# Security: Switch to non-root user
+# ============================================================================
+# All subsequent commands and the container will run as this user
+USER sandbox
+
+# ============================================================================
+# Health check and runtime
+# ============================================================================
+# Keep container running for reuse (more efficient than starting new containers)
+# The agent platform will exec commands into this running container
+CMD ["sleep", "infinity"]
+
+# ============================================================================
+# Security Notes:
+# ============================================================================
+# 1. Non-root user: Prevents privilege escalation
+# 2. Minimal base image: Reduces attack surface
+# 3. No package managers: Limits what code can install
+# 4. No network tools: Prevents data exfiltration
+# 5. Read-only filesystem: Set via Docker run flags
+# 6. Memory limits: Set via Docker run flags
+# 7. CPU limits: Set via Docker run flags
+# 8. Network disabled: Set via Docker run flags
+# 9. No capabilities: Set via Docker run flags
+# 10. gVisor runtime: Optional, set via Docker run flags
+#
+# Example secure docker run:
+# docker run -d \
+#   --read-only \
+#   --tmpfs /tmp:rw,noexec,nosuid,size=100m \
+#   --memory=512m \
+#   --cpus=1.0 \
+#   --network=none \
+#   --cap-drop=ALL \
+#   --security-opt=no-new-privileges \
+#   --name agent-sandbox \
+#   agent-sandbox:latest
+# ============================================================================
