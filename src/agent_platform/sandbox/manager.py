@@ -59,30 +59,151 @@ class SandboxManager:
     Provides methods for creating, executing code in, and destroying
     isolated container environments for untrusted code execution.
     
+    Automatically detects Docker availability and handles connection issues gracefully.
+    
     Example:
         >>> manager = SandboxManager()
-        >>> sandbox_id = manager.create_sandbox("/workspace")
-        >>> result = manager.execute_code(sandbox_id, "print('Hello')")
-        >>> print(result["stdout"])  # "Hello\\n"
-        >>> manager.destroy_sandbox(sandbox_id)
+        >>> if manager.is_docker_available():
+        ...     sandbox_id = manager.create_sandbox("/workspace")
+        ...     result = manager.execute_code(sandbox_id, "print('Hello')")
+        ...     print(result["stdout"])  # "Hello\n"
+        ...     manager.destroy_sandbox(sandbox_id)
+        ... else:
+        ...     print("Docker not available")
     """
     
     def __init__(self, config: Optional[SandboxConfig] = None):
         """
-        Initialize sandbox manager.
+        Initialize sandbox manager with Docker connectivity detection.
         
         Args:
             config: Sandbox configuration (uses defaults if not provided).
+        
+        Raises:
+            DockerException: If Docker is explicitly required but not available.
         """
         self.config = config or SandboxConfig()
-        self.client = docker.from_env()
+        self.client = None
+        self.docker_available = False
         self.active_sandboxes: Dict[str, Sandbox] = {}
         self.logger = get_logger(__name__)
         
+        # Attempt to initialize Docker connection
+        self._initialize_docker_client()
+        
         self.logger.info(
-            "Initialized SandboxManager",
-            extra={"image": self.config.image, "memory_limit": self.config.memory_limit}
+            "SandboxManager initialization completed",
+            extra={
+                "docker_available": self.docker_available,
+                "image": self.config.image,
+                "memory_limit": self.config.memory_limit
+            }
         )
+    
+    def _initialize_docker_client(self) -> None:
+        """
+        Initialize Docker client with comprehensive error handling.
+        
+        Attempts to connect to Docker daemon with proper error handling,
+        logging, and fallback behavior.
+        """
+        try:
+            # Test Docker availability with ping
+            self.client = docker.from_env()
+            self.client.ping()
+            self.docker_available = True
+            
+            self.logger.info(
+                "Docker client initialized successfully",
+                extra={"docker_version": self.client.version()["Version"]}
+            )
+            
+        except ImportError as e:
+            self.logger.error(
+                "Docker library not available",
+                extra={"error": str(e)},
+                exc_info=True
+            )
+            self.docker_available = False
+            
+        except docker.errors.DockerException as e:
+            self.logger.error(
+                "Docker daemon not available or not running",
+                extra={"error": str(e)},
+                exc_info=True
+            )
+            self.docker_available = False
+            
+        except Exception as e:
+            self.logger.error(
+                "Unexpected Docker initialization error",
+                extra={"error": str(e)},
+                exc_info=True
+            )
+            self.docker_available = False
+    
+    def is_docker_available(self) -> bool:
+        """
+        Check if Docker is available and working.
+        
+        Returns:
+            True if Docker client is initialized and can communicate with daemon.
+        """
+        if not self.docker_available or self.client is None:
+            return False
+            
+        try:
+            self.client.ping()
+            return True
+        except Exception as e:
+            self.logger.warning(
+                "Docker connectivity check failed",
+                extra={"error": str(e)}
+            )
+            self.docker_available = False
+            return False
+    
+    def get_docker_info(self) -> Dict:
+        """
+        Get Docker daemon information.
+        
+        Returns:
+            Dictionary with Docker version and status information.
+            Empty dict if Docker is not available.
+        """
+        if not self.is_docker_available():
+            return {"available": False, "status": "unavailable"}
+            
+        try:
+            version_info = self.client.version()
+            return {
+                "available": True,
+                "status": "connected",
+                "version": version_info.get("Version", "unknown"),
+                "api_version": version_info.get("ApiVersion", "unknown"),
+                "containers_running": len(self.client.containers.list()),
+                "images_count": len(self.client.images.list())
+            }
+        except Exception as e:
+            self.logger.error(
+                "Failed to get Docker info",
+                extra={"error": str(e)},
+                exc_info=True
+            )
+            return {"available": False, "status": "error", "error": str(e)}
+    
+    def assert_docker_available(self) -> None:
+        """
+        Assert that Docker is available, raising exception if not.
+        
+        Raises:
+            DockerException: If Docker is not available.
+        """
+        if not self.is_docker_available():
+            raise DockerException(
+                "Docker is not available. Cannot perform Docker-based sandbox operations. "
+                "Consider using MockSandboxManager instead or ensure Docker is installed and running."
+            )
     
     def create_sandbox(self, workspace_path: str) -> str:
         """
@@ -101,6 +222,13 @@ class SandboxManager:
             >>> manager = SandboxManager()
             >>> sandbox_id = manager.create_sandbox("/tmp/myworkspace")
         """
+        # Ensure Docker is available before attempting operations
+        if not self.is_docker_available():
+            raise DockerException(
+                "Cannot create sandbox: Docker is not available. "
+                "Check Docker daemon status and ensure Docker is running."
+            )
+        
         try:
             # Ensure image exists
             self._ensure_image_exists()
@@ -168,8 +296,18 @@ class SandboxManager:
             ...     sandbox_id,
             ...     "print('Hello, World!')"
             ... )
-            >>> print(result["stdout"])  # "Hello, World!\\n"
+            >>> print(result["stdout"])  # "Hello, World!\n"
         """
+        # Ensure Docker is available before attempting operations
+        if not self.is_docker_available():
+            return {
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": "Docker is not available for code execution",
+                "success": False,
+                "execution_time": 0.0
+            }
+            
         self._validate_sandbox(sandbox_id)
         sandbox = self.active_sandboxes[sandbox_id]
         timeout = timeout or self.config.timeout
@@ -262,6 +400,16 @@ class SandboxManager:
             ...     args=["--verbose"]
             ... )
         """
+        # Ensure Docker is available before attempting operations
+        if not self.is_docker_available():
+            return {
+                "exit_code": -1,
+                "stdout": "",
+                "stderr": "Docker is not available for file execution",
+                "success": False,
+                "execution_time": 0.0
+            }
+            
         self._validate_sandbox(sandbox_id)
         sandbox = self.active_sandboxes[sandbox_id]
         timeout = timeout or self.config.timeout
@@ -316,6 +464,13 @@ class SandboxManager:
         """
         if sandbox_id not in self.active_sandboxes:
             self.logger.warning(f"Sandbox not found: {sandbox_id[:12]}")
+            return
+        
+        # Ensure Docker is available before attempting operations
+        if not self.is_docker_available():
+            self.logger.warning(f"Cannot destroy sandbox: Docker is not available")
+            # Clean up local tracking even if Docker is unavailable
+            del self.active_sandboxes[sandbox_id]
             return
         
         sandbox = self.active_sandboxes[sandbox_id]
@@ -388,15 +543,23 @@ class SandboxManager:
         self._validate_sandbox(sandbox_id)
         sandbox = self.active_sandboxes[sandbox_id]
         
-        # Reload container stats
-        sandbox.container.reload()
+        # Only reload if Docker is available
+        if self.is_docker_available():
+            try:
+                sandbox.container.reload()
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to reload container: {e}",
+                    extra={"sandbox_id": sandbox_id[:12]}
+                )
         
         return {
             "sandbox_id": sandbox_id,
             "workspace": sandbox.workspace_path,
             "age": time.time() - sandbox.created_at,
-            "status": sandbox.container.status,
-            "created_at": sandbox.created_at
+            "status": sandbox.container.status if self.is_docker_available() else "unknown",
+            "created_at": sandbox.created_at,
+            "docker_available": self.docker_available
         }
     
     def _validate_sandbox(self, sandbox_id: str) -> None:
@@ -410,13 +573,24 @@ class SandboxManager:
             raise ValueError(f"Sandbox not found: {sandbox_id}")
         
         sandbox = self.active_sandboxes[sandbox_id]
-        sandbox.container.reload()
         
-        if sandbox.container.status != "running":
-            raise ValueError(f"Sandbox is not running: {sandbox_id}")
+        # Only check status if Docker is available
+        if self.is_docker_available():
+            try:
+                sandbox.container.reload()
+                if sandbox.container.status != "running":
+                    raise ValueError(f"Sandbox is not running: {sandbox_id}")
+            except Exception as e:
+                self.logger.warning(
+                    f"Failed to validate sandbox status: {e}",
+                    extra={"sandbox_id": sandbox_id[:12]}
+                )
     
     def _ensure_image_exists(self) -> None:
         """Pull sandbox image if it doesn't exist."""
+        if not self.is_docker_available():
+            raise DockerException("Cannot ensure image exists: Docker is not available")
+            
         try:
             self.client.images.get(self.config.image)
         except ImageNotFound:
@@ -425,6 +599,9 @@ class SandboxManager:
     
     def _build_container_config(self, workspace_path: str) -> Dict:
         """Build container configuration with security settings."""
+        if not self.is_docker_available():
+            raise DockerException("Cannot build container config: Docker is not available")
+            
         config = {
             "image": self.config.image,
             "detach": True,

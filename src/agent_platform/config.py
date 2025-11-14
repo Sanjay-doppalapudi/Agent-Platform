@@ -134,6 +134,34 @@ class SandboxConfig(BaseSettings):
         default=True,
         description="Disable network access in sandbox",
     )
+    enabled: bool = Field(
+        default=True,
+        description="Enable sandbox functionality. Set to False to disable Docker-based execution",
+    )
+    mock_mode: bool = Field(
+        default=False,
+        description="Use mock sandbox implementation when Docker is not available",
+    )
+    docker_auto_detect: bool = Field(
+        default=True,
+        description="Automatically detect Docker availability on startup",
+    )
+    docker_required: bool = Field(
+        default=False,
+        description="Require Docker to be available (fail startup if not available)",
+    )
+    docker_connection_timeout: int = Field(
+        default=5,
+        ge=1,
+        le=30,
+        description="Docker connection timeout in seconds",
+    )
+    docker_max_retries: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description="Maximum number of Docker connection retry attempts",
+    )
 
     @field_validator("memory_limit")
     @classmethod

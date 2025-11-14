@@ -82,6 +82,17 @@ class HealthResponse(BaseModel):
     version: str = Field(..., description="Application version")
     uptime: float = Field(..., description="Uptime in seconds")
     active_sandboxes: int = Field(default=0, description="Number of active sandbox containers")
+    sandbox_mode: str = Field(default="unknown", description="Sandbox mode: docker, mock, disabled, or unknown")
+
+
+class SandboxStatusResponse(BaseModel):
+    """Sandbox status response."""
+    
+    status: str = Field(..., description="Current sandbox status")
+    enabled: bool = Field(..., description="Whether sandbox is enabled in configuration")
+    mock_mode: bool = Field(..., description="Whether mock mode is enabled")
+    active_sandboxes: int = Field(default=0, description="Number of active sandboxes")
+    docker_available: bool = Field(..., description="Whether Docker is available")
 
 
 class StreamChunk(BaseModel):

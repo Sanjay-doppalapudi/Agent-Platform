@@ -1,0 +1,27 @@
+# Requirements for Agent Platform Docker-Free Mode
+# Core dependencies for running without Docker
+
+# Web Framework
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+
+# Configuration Management
+pydantic>=2.5.0
+pydantic-settings>=2.1.0
+
+# Logging and Utilities
+structlog>=23.2.0
+
+# Async Support
+aiofiles>=23.2.0
+
+# Optional: Docker support (for when Docker becomes available)
+# Uncomment the line below if you want Docker support
+# docker>=6.1.0
+
+# Development Dependencies (optional)
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
+# black>=23.0.0
+# isort>=5.12.0
+# mypy>=1.7.0
