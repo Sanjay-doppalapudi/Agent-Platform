@@ -1,0 +1,4 @@
+node_modules/
+harness.exe
+harness.config.json
+*.log

@@ -1,0 +1,94 @@
+// Human-friendly tool rendering: labels, result summaries, and diff blocks.
+// Everything here is pure string work on data already in memory — no I/O.
+
+const R = "\x1b[0m";
+const DIM = "\x1b[2m";
+const RED = "\x1b[31m";
+const GREEN = "\x1b[32m";
+
+function trunc(s: string, n: number): string {
+  return s.length > n ? s.slice(0, n - 1) + "…" : s;
+}
+
+function lineCount(s: string): number {
+  return s ? s.split("\n").filter(Boolean).length : 0;
+}
+
+/** One-line human label for a tool call, e.g. `read src/app.ts`. */
+export function toolLabel(name: string, args: any): string {
+  const a = args ?? {};
+  switch (name) {
+    case "read": return `read ${a.path ?? ""}${a.offset ? `:${a.offset}` : ""}`;
+    case "write": return `write ${a.path ?? ""}`;
+    case "edit": return `edit ${a.path ?? ""}`;
+    case "bash": return `bash ${trunc(String(a.cmd ?? "").replace(/\s+/g, " "), 70)}${a.background ? " &" : ""}`;
+    case "glob": return `glob ${a.pattern ?? ""}`;
+    case "grep": return `grep ${trunc(String(a.pattern ?? ""), 40)}${a.glob ? ` (${a.glob})` : ""}${a.mode && a.mode !== "content" ? ` [${a.mode}]` : ""}`;
+    default: return `${name} ${trunc(JSON.stringify(a), 60)}`;
+  }
+}
+
+/** Short result summary shown after ✓/✗, e.g. `40 lines`. */
+export function toolSummary(name: string, output: string, error?: boolean): string {
+  if (error) return trunc(output.replace(/^error:\s*/, "").split("\n")[0] ?? "", 80);
+  switch (name) {
+    case "read": {
+      if (output.startsWith("binary file")) return "binary — skipped";
+      return `${lineCount(output)} lines`;
+    }
+    case "glob": return output === "(no matches)" ? "no matches" : `${lineCount(output)} files`;
+    case "grep": return output === "(no matches)" ? "no matches" : `${lineCount(output)} hits`;
+    case "write": return output.replace(/ to .*$/, ""); // "wrote 123 bytes"
+    case "edit": return output.replace(/ in .*$/, "").replace("occurrences", "").replace("occurrence", "").trim();
+    case "bash": {
+      const first = output.split("\n")[0] ?? "";
+      if (first.startsWith("[exit code") || first.startsWith("[timed out")) return trunc(first, 50);
+      if (first.startsWith("started background")) return trunc(first.replace("started background process ", ""), 60);
+      return output === "(no output)" ? "ok" : `${lineCount(output)} lines out`;
+    }
+    default: return "";
+  }
+}
+
+function capLines(lines: string[], max: number): { shown: string[]; hidden: number } {
+  if (lines.length <= max) return { shown: lines, hidden: 0 };
+  return { shown: lines.slice(0, max), hidden: lines.length - max };
+}
+
+/**
+ * Diff block for edit/write, rendered from the tool args (no file reads).
+ * For edit: common leading/trailing lines between old and new are trimmed so
+ * only the actual change shows. Returns "" for other tools.
+ */
+export function renderDiff(name: string, args: any, maxWidth?: number): string {
+  const width = Math.min((maxWidth ?? process.stdout.columns ?? 80) - 3, 120);
+  const out: string[] = [];
+
+  if (name === "edit") {
+    const oldL = String(args?.old ?? "").split("\n");
+    const newL = String(args?.new ?? "").split("\n");
+    while (oldL.length && newL.length && oldL[0] === newL[0]) { oldL.shift(); newL.shift(); }
+    while (oldL.length && newL.length && oldL[oldL.length - 1] === newL[newL.length - 1]) { oldL.pop(); newL.pop(); }
+    out.push(`${DIM}╭ ${args?.path ?? ""}${R}`);
+    const o = capLines(oldL, 12);
+    for (const l of o.shown) out.push(`${RED}- ${trunc(l, width)}${R}`);
+    if (o.hidden) out.push(`${DIM}  … ${o.hidden} more removed lines${R}`);
+    const n = capLines(newL, 12);
+    for (const l of n.shown) out.push(`${GREEN}+ ${trunc(l, width)}${R}`);
+    if (n.hidden) out.push(`${DIM}  … ${n.hidden} more added lines${R}`);
+    out.push(`${DIM}╰${R}`);
+    return out.join("\n") + "\n";
+  }
+
+  if (name === "write") {
+    const lines = String(args?.content ?? "").split("\n");
+    out.push(`${DIM}╭ ${args?.path ?? ""} · ${lines.length} lines${R}`);
+    const c = capLines(lines, 12);
+    for (const l of c.shown) out.push(`${GREEN}+ ${trunc(l, width)}${R}`);
+    if (c.hidden) out.push(`${DIM}  … ${c.hidden} more lines${R}`);
+    out.push(`${DIM}╰${R}`);
+    return out.join("\n") + "\n";
+  }
+
+  return "";
+}

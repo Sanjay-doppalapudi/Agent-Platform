@@ -1,0 +1,17 @@
+{
+  "name": "harness",
+  "version": "0.1.0",
+  "description": "Minimal, fast coding agent CLI (OpenAI-compatible providers)",
+  "type": "module",
+  "bin": {
+    "harness": "src/index.ts"
+  },
+  "scripts": {
+    "dev": "bun run src/index.ts",
+    "typecheck": "bun x tsc --noEmit",
+    "compile": "bun build --compile --minify src/index.ts --outfile harness.exe && harness.exe --version"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.2.0"
+  }
+}
