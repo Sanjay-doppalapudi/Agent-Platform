@@ -155,4 +155,13 @@ Each session is one append-only JSONL file in `<dataDir>/sessions/<id>.jsonl` �
 git tag v0.1.0 && git push --tags
 ```
 
-GitHub Actions cross-compiles all four platform binaries (`ap-windows-x64.exe`, `ap-linux-x64`, `ap-darwin-arm64`, `ap-darwin-x64`) and attaches them to the release; the install one-liners always fetch the latest release. To publish on the npm registry: the package name is `agentplatform` — `npm login && npm publish`, after which `npm i -g agentplatform` / `bun add -g agentplatform` / `yarn global add agentplatform` work everywhere bun is installed.
+GitHub Actions cross-compiles all four platform binaries (`ap-windows-x64.exe`, `ap-linux-x64`, `ap-darwin-arm64`, `ap-darwin-x64`) and attaches them to the release; the install one-liners always fetch the latest release.
+
+**Registry installs** (after `npm publish` — package is `@sanjaydoppalapudi/agentplatform`, command is still `ap`):
+
+```sh
+npm i -g @sanjaydoppalapudi/agentplatform
+bun add -g @sanjaydoppalapudi/agentplatform
+yarn global add @sanjaydoppalapudi/agentplatform
+pnpm add -g @sanjaydoppalapudi/agentplatform
+```

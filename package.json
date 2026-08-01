@@ -1,7 +1,10 @@
 {
-  "name": "agentplatform",
+  "name": "@sanjaydoppalapudi/agentplatform",
   "version": "0.1.0",
   "description": "Agent Platform (ap) — minimal, fast coding agent CLI (OpenAI-compatible providers)",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/Sanjay-doppalapudi/Agent-Platform.git"
