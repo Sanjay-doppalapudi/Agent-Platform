@@ -74,6 +74,8 @@ export async function replMain(flags: CliFlags) {
 
   let lastUsage: Usage | undefined;
   let verbose = true;
+  let lastPlan: string | null = null; // most recent plan-mode output
+  let planArmed = false;              // attach the plan to the next code-mode message
   const spinner = makeSpinner();
   const history: string[] = [];
 
@@ -91,15 +93,39 @@ export async function replMain(flags: CliFlags) {
       hidden.shift();
     }
   };
+  // Rows the last reveal block occupies on screen (wrap-aware); 0 = nothing
+  // erasable. Invalidated the moment anything else prints.
+  let revealRows = 0;
+  const rowsAdvanced = (s: string): number => {
+    const cols = Math.max(process.stdout.columns ?? 80, 20);
+    const parts = s.split("\n");
+    let rows = 0;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const len = parts[i]!.replace(/\x1b\[[0-9;]*m/g, "").length;
+      rows += 1 + Math.max(0, Math.ceil(len / cols) - 1);
+    }
+    return rows;
+  };
   const toggleVerbose = () => {
     verbose = !verbose;
-    process.stdout.write(`\n${dim(`[details ${verbose ? "on — reasoning & diffs shown" : "off — tool lines only"}]`)}\n`);
-    if (verbose && hidden.length) {
-      process.stdout.write(dim("── hidden while off ──"));
-      process.stdout.write(dim(hidden.join("")) + "\n");
-      hidden.length = 0;
-      hiddenBytes = 0;
-      hiddenLastWasReason = false;
+    if (verbose) {
+      if (hidden.length) {
+        const block =
+          `\n${dim("[details on — ctrl+o hides them again]")}\n` +
+          dim(hidden.join("").replace(/^\n+/, "")) + "\n";
+        process.stdout.write(block);
+        revealRows = rowsAdvanced(block);
+      } else {
+        process.stdout.write(`\n${dim("[details on — reasoning & diffs shown]")}\n`);
+        revealRows = 0;
+      }
+    } else {
+      if (revealRows > 0) {
+        process.stdout.write(`\x1b[${revealRows}A\r\x1b[J`); // erase the reveal in place
+        revealRows = 0;
+      } else {
+        process.stdout.write(`\n${dim("[details off — tool lines only]")}\n`);
+      }
     }
   };
 
@@ -221,7 +247,12 @@ export async function replMain(flags: CliFlags) {
           const target = cmd === "mode" ? rest[0] : cmd;
           if (target === "plan" || target === "code") {
             config.mode = target;
-            console.log(dim(`mode → ${target}${target === "plan" ? " (read-only tools)" : ""}`));
+            let note = target === "plan" ? " (read-only tools)" : "";
+            if (target === "code" && lastPlan) {
+              planArmed = true;
+              note = " — plan armed: your next message carries the plan and it will be followed exactly";
+            }
+            console.log(dim(`mode → ${target}${note}`));
           } else console.log(dim(`mode: ${config.mode} (use /plan or /code)`));
           continue;
         }
@@ -279,6 +310,7 @@ export async function replMain(flags: CliFlags) {
 
     const emit = (e: AgentEvent) => {
       spinner.stop();
+      revealRows = 0; // new output below a reveal — it can no longer be erased in place
       switch (e.type) {
         case "reasoning": {
           if (!verbose) { stash(e.delta, true); break; }
@@ -336,10 +368,21 @@ export async function replMain(flags: CliFlags) {
       }
     };
 
+    // Fresh turn: old hidden details no longer apply.
+    hidden.length = 0; hiddenBytes = 0; hiddenLastWasReason = false; revealRows = 0;
+
+    let userText = input;
+    if (planArmed && lastPlan && config.mode === "code") {
+      userText += `\n\n<approved_plan>\n${lastPlan}\n</approved_plan>\nIf this message asks to implement the plan above, follow it EXACTLY — every step in order, nothing added, nothing skipped, no improvisation. If a step turns out to be impossible, stop and report instead of deviating.`;
+      planArmed = false;
+      process.stdout.write(dim("[plan attached — following it exactly]\n"));
+    }
+
     spinner.start("thinking");
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
+    let finalText = "";
     try {
-      await runTurn(config, provider, session, input, emit, ctrl.signal);
+      finalText = await runTurn(config, provider, session, userText, emit, ctrl.signal);
     } catch {
       // error already emitted
     } finally {
@@ -348,6 +391,20 @@ export async function replMain(flags: CliFlags) {
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       const cached = totals.cached ? ` (${totals.cached} cached)` : "";
       process.stdout.write(dim(`\n${totals.steps} step${totals.steps === 1 ? "" : "s"} · ↑${totals.prompt}${cached} ↓${totals.completion} · ${secs}s\n`));
+    }
+
+    if (config.mode === "plan" && finalText.trim()) {
+      lastPlan = finalText;
+      if (finalText.length > 150) {
+        try {
+          const { exportPlanHtml, openInBrowser } = await import("./planview.ts");
+          const planPath = exportPlanHtml(finalText, provider.model, config.cwd);
+          openInBrowser(planPath);
+          process.stdout.write(dim(`plan → ${planPath} (opened in browser) · /code to implement it exactly\n`));
+        } catch (e) {
+          process.stdout.write(dim(`plan export failed: ${(e as Error).message}\n`));
+        }
+      }
     }
   }
 }
