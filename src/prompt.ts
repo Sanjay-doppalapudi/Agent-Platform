@@ -9,7 +9,7 @@ import { shellPrefix } from "./tools/bash.ts";
 
 const MEMORY_CHAR_CAP = 2000;
 
-/** Concatenated saved memories, capped — stable bytes while files are unchanged. */
+/** Concatenated saved memories, capped. */
 function readMemories(memDir: string): string {
   let out = "";
   try {
@@ -22,6 +22,22 @@ function readMemories(memDir: string): string {
     }
   } catch {}
   return out;
+}
+
+// Memories are SNAPSHOTTED once per session: a memory written mid-session is
+// already in the conversation history, so deferring its injection to the next
+// session loses nothing — and the system prompt stays byte-identical for the
+// whole session, so the provider's prefix cache is never invalidated.
+const memorySnapshots = new Map<string, string>();
+
+function memoriesForSession(memDir: string, sessionKey: string): string {
+  const key = `${memDir}|${sessionKey}`;
+  let snap = memorySnapshots.get(key);
+  if (snap === undefined) {
+    snap = readMemories(memDir);
+    memorySnapshots.set(key, snap);
+  }
+  return snap;
 }
 
 export function buildSystemPrompt(config: Config): string {
@@ -48,7 +64,7 @@ PLAN MODE: You have read-only tools. Explore the codebase, then produce a concre
   prompt += `
 
 Memory: when the user corrects you or wants something different from what you did, save it — write ${memDir}\\<short-slug>.md with exactly three lines: "Title: …", "User wanted: …", "Why (guess): …". Consult the saved memories below before repeating a choice the user disliked.`;
-  const memories = readMemories(memDir);
+  const memories = memoriesForSession(memDir, config.sessionId ?? "");
   if (memories) prompt += `\n\nSaved user preferences:\n${memories}`;
 
   if (config.sessionId) {
