@@ -2,6 +2,11 @@
   "name": "harness",
   "version": "0.1.0",
   "description": "Minimal, fast coding agent CLI (OpenAI-compatible providers)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Sanjay-doppalapudi/Agent-Platform.git"
+  },
+  "license": "MIT",
   "type": "module",
   "bin": {
     "harness": "src/index.ts"

@@ -32,18 +32,38 @@ Common flags: `--provider <name>` `-m/--model <id>` `--cwd <dir>` `--session <id
 - **code** (default): all six tools, full write access.
 - **plan**: only `read`/`glob`/`grep` schemas are sent — the agent is structurally read-only and instructed to produce an implementation plan. Switch live in the REPL with `:plan` / `:code`. Mutating calls are also blocked server-side as a backstop. Each mode has its own stable prompt prefix, so caching works in both.
 
-## Install on another machine
+## Install
 
-**Option A — compiled binary (no runtime needed):**
-`bun run dist` cross-compiles all four targets into `dist/` (windows-x64, linux-x64, darwin-arm64, darwin-x64). Copy the right binary, put it on PATH, install [ripgrep](https://github.com/BurntSushi/ripgrep) (`winget install BurntSushi.ripgrep.MSVC` / `brew install ripgrep` / `apt install ripgrep`), drop a config at `~/.harness/config.json`. Done.
+**One-liner binary install (no runtime needed — requires a published release):**
 
-**Option B — from source (needs bun):**
+```powershell
+# Windows
+irm https://raw.githubusercontent.com/Sanjay-doppalapudi/Agent-Platform/main/install.ps1 | iex
+```
 ```sh
-git clone <repo> && cd harness
-bun install && bun link      # `harness` now on PATH via bun's global bin
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/Sanjay-doppalapudi/Agent-Platform/main/install.sh | bash
 ```
 
-**Option C — npm/bun registry:** rename the package to something unique (e.g. `@yourscope/harness`), `npm publish`, then `bun i -g @yourscope/harness` on any machine with bun (the shebang routes the bin through bun). For Homebrew, publish the `dist/` binaries as GitHub release assets and point a tap formula at them.
+**Straight from GitHub via a package manager (requires bun on the machine):**
+
+```sh
+bun add -g github:Sanjay-doppalapudi/Agent-Platform
+npm  i  -g github:Sanjay-doppalapudi/Agent-Platform
+yarn global add Sanjay-doppalapudi/Agent-Platform
+pnpm add -g github:Sanjay-doppalapudi/Agent-Platform
+bunx github:Sanjay-doppalapudi/Agent-Platform --help   # one-off, no install
+```
+
+**From source:**
+```sh
+git clone https://github.com/Sanjay-doppalapudi/Agent-Platform && cd Agent-Platform
+bun install && bun link
+```
+
+All installs need [ripgrep](https://github.com/BurntSushi/ripgrep) on PATH (`winget install BurntSushi.ripgrep.MSVC` / `brew install ripgrep` / `apt install ripgrep`), then `harness auth <provider>` to store a key.
+
+**Releasing binaries:** `git tag v0.1.0 && git push --tags` — the GitHub Actions workflow cross-compiles all four platform binaries and attaches them to the release; the one-liner installers always pull the latest release. To publish on the npm registry instead, rename the package to something unique (e.g. `@yourscope/harness`) and `npm publish`.
 
 ## Sessions (no database)
 

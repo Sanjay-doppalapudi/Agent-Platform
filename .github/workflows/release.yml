@@ -1,0 +1,22 @@
+# Cut a release: git tag v0.1.0 && git push --tags
+# Builds all four binaries (bun cross-compiles from one runner) and attaches
+# them to the GitHub release, which the install one-liners download.
+name: release
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - run: bun x tsc --noEmit
+      - run: bun run dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
