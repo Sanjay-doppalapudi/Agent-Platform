@@ -1,9 +1,10 @@
-// Interactive REPL: streaming render, Ctrl+C aborts the turn (not the
-// process), :commands for session control.
-import { createInterface } from "node:readline";
+// Interactive REPL: slash-command menu, streaming markdown render, ctrl+o
+// detail toggle (with retroactive reveal), ctrl+c aborts the turn.
+import { emitKeypressEvents } from "node:readline";
 import { loadConfig, resolveProvider } from "./config.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
 import { buildSystemPrompt } from "./prompt.ts";
+import { readLine, type SlashCommand } from "./input.ts";
 import { MdRenderer } from "./md.ts";
 import { renderDiff, toolLabel, toolSummary } from "./ui.ts";
 import { Session } from "./session.ts";
@@ -15,6 +16,19 @@ const cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+
+const COMMANDS: SlashCommand[] = [
+  { name: "/plan", desc: "read-only mode: explore & produce a plan" },
+  { name: "/code", desc: "full mode: all tools (default)" },
+  { name: "/model", desc: "switch model, or provider/model", hasArg: true },
+  { name: "/models", desc: "search the models.dev catalog", hasArg: true },
+  { name: "/new", desc: "start a fresh session" },
+  { name: "/resume", desc: "resume a session by id", hasArg: true },
+  { name: "/sessions", desc: "list recent sessions" },
+  { name: "/system", desc: "show the system prompt" },
+  { name: "/context", desc: "show context/token usage" },
+  { name: "/exit", desc: "quit" },
+];
 
 function makeSpinner() {
   const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -56,33 +70,78 @@ export async function replMain(flags: CliFlags) {
 
   console.log(`${cyan("◆")} ${bold("harness")} ${dim("·")} ${provider.name}/${provider.model}`);
   console.log(dim(`  cwd ${config.cwd}`));
-  console.log(dim(`  session ${session.id} · :new :resume <id> :model <id> :system :context :exit`));
+  console.log(dim(`  session ${session.id} · type / for commands · ctrl+o details · ctrl+c abort`));
 
   let lastUsage: Usage | undefined;
+  let verbose = true;
   const spinner = makeSpinner();
+  const history: string[] = [];
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  const ask = (q: string) => new Promise<string>((res) => rl.question(q, res));
+  // Details hidden by ctrl+o are buffered (capped) and replayed on toggle-on.
+  const hidden: string[] = [];
+  let hiddenBytes = 0;
+  let hiddenLastWasReason = false;
+  const stash = (text: string, isReason: boolean) => {
+    if (isReason && !hiddenLastWasReason) hidden.push("\n✻ ");
+    hiddenLastWasReason = isReason;
+    hidden.push(text);
+    hiddenBytes += text.length;
+    while (hiddenBytes > 60_000 && hidden.length) {
+      hiddenBytes -= hidden[0]!.length;
+      hidden.shift();
+    }
+  };
+  const toggleVerbose = () => {
+    verbose = !verbose;
+    process.stdout.write(`\n${dim(`[details ${verbose ? "on — reasoning & diffs shown" : "off — tool lines only"}]`)}\n`);
+    if (verbose && hidden.length) {
+      process.stdout.write(dim("── hidden while off ──"));
+      process.stdout.write(dim(hidden.join("")) + "\n");
+      hidden.length = 0;
+      hiddenBytes = 0;
+      hiddenLastWasReason = false;
+    }
+  };
+
+  emitKeypressEvents(process.stdin);
 
   let ctrl: AbortController | null = null;
-  rl.on("SIGINT", () => {
-    if (ctrl) {
+  const abortTurn = () => {
+    if (ctrl && !ctrl.signal.aborted) {
       ctrl.abort();
       process.stdout.write(dim("\n[turn aborted]\n"));
-    } else {
-      rl.close();
-      process.exit(0);
     }
+  };
+  // During a turn (readLine not active) handle ctrl+o / ctrl+c ourselves.
+  process.stdin.on("keypress", (_s, key) => {
+    if (!key?.ctrl || !ctrl) return;
+    if (key.name === "o") toggleVerbose();
+    else if (key.name === "c") abortTurn();
   });
 
-  for (;;) {
-    const input = (await ask(cyan("\n› "))).trim();
-    if (!input) continue;
+  const exit = (code = 0): never => {
+    console.log(dim(`\nsession ${session.id} — resume with: harness --resume ${session.id}`));
+    process.exit(code);
+  };
 
-    if (input.startsWith(":")) {
+  for (;;) {
+    const promptLabel = `${dim(config.mode)} ${cyan("›")} `;
+    process.stdout.write("\n"); // once — NOT inside the prompt, which re-renders per keypress
+    const input = (await readLine({
+      prompt: promptLabel,
+      commands: COMMANDS,
+      history,
+      onCtrlO: toggleVerbose,
+    }))?.trim();
+
+    if (input === null || input === undefined) exit(0); // ctrl+c at empty prompt
+    if (!input) continue;
+    history.push(input);
+
+    if (input.startsWith("/") || input.startsWith(":")) {
       const [cmd, ...rest] = input.slice(1).split(/\s+/);
       switch (cmd) {
-        case "exit": case "q": rl.close(); process.exit(0);
+        case "exit": case "q": case "quit": exit(0);
         case "new":
           session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
           console.log(dim(`new session ${session.id}`));
@@ -93,10 +152,79 @@ export async function replMain(flags: CliFlags) {
             console.log(dim(`resumed ${session.id} (${session.history.length} msgs)`));
           } catch (e) { console.log(dim((e as Error).message)); }
           continue;
-        case "model":
-          if (rest[0]) { provider = { ...provider, model: rest[0] }; console.log(dim(`model → ${provider.model}`)); }
-          else console.log(dim(`model: ${provider.model}`));
+        case "session": case "sessions": {
+          for (const s of Session.list(config.dataDir)) {
+            const mark = s.id === session.id ? cyan("▸") : " ";
+            console.log(`${mark} ${s.id} ${dim(new Date(s.mtime).toLocaleString())}`);
+          }
           continue;
+        }
+        case "model": {
+          const arg = rest[0];
+          if (!arg) { console.log(dim(`model: ${provider.name}/${provider.model}`)); continue; }
+          const slash = arg.indexOf("/");
+          if (slash === -1) {
+            provider = { ...provider, model: arg };
+            console.log(dim(`model → ${provider.model}`));
+            continue;
+          }
+          const pfx = arg.slice(0, slash);
+          const modelId = arg.slice(slash + 1);
+          if (pfx === provider.name) {
+            // "opencode-go/minimax-m3" on the opencode-go provider → bare id
+            provider = { ...provider, model: modelId };
+            console.log(dim(`model → ${provider.model}`));
+          } else if (config.providers[pfx]) {
+            try {
+              provider = resolveProvider(config, { provider: pfx, model: modelId } as CliFlags);
+              console.log(dim(`provider → ${pfx}, model → ${modelId}`));
+            } catch (e) { console.log(dim((e as Error).message)); }
+          } else {
+            // unknown provider → try the models.dev catalog
+            try {
+              const { loadCatalog, providerBaseUrl, envKeyFor } = await import("./models.ts");
+              const { getKey } = await import("./creds.ts");
+              const catalog = await loadCatalog(config.dataDir);
+              const cp = catalog[pfx];
+              const baseUrl = cp && providerBaseUrl(cp);
+              if (!cp || !baseUrl) {
+                console.log(dim(`unknown provider "${pfx}" — try /models ${pfx}`));
+                continue;
+              }
+              const key = envKeyFor(cp) ?? getKey(config.dataDir, pfx);
+              if (!key) {
+                console.log(dim(`no key for ${pfx} — run: harness auth ${pfx}  (env: ${cp.env?.join("/") ?? "none listed"})`));
+                continue;
+              }
+              provider = { name: pfx, baseUrl, apiKey: key, model: modelId, cacheControl: false, headers: {} };
+              console.log(dim(`provider → ${pfx} via models.dev (${baseUrl}), model → ${modelId}`));
+            } catch (e) { console.log(dim((e as Error).message)); }
+          }
+          continue;
+        }
+        case "models": {
+          try {
+            const { loadCatalog, searchModels } = await import("./models.ts");
+            const catalog = await loadCatalog(config.dataDir);
+            const rows = searchModels(catalog, rest.join(" "));
+            if (!rows.length) { console.log(dim("no matches")); continue; }
+            for (const r of rows) {
+              const cost = r.inCost != null ? `$${r.inCost}/$${r.outCost ?? "?"}` : "";
+              const ctx = r.ctx ? `${Math.round(r.ctx / 1000)}k` : "";
+              console.log(`  ${r.provider}/${r.model} ${dim([ctx, cost].filter(Boolean).join(" · "))}`);
+            }
+            console.log(dim(`switch with /model <provider>/<model>`));
+          } catch (e) { console.log(dim((e as Error).message)); }
+          continue;
+        }
+        case "mode": case "plan": case "code": {
+          const target = cmd === "mode" ? rest[0] : cmd;
+          if (target === "plan" || target === "code") {
+            config.mode = target;
+            console.log(dim(`mode → ${target}${target === "plan" ? " (read-only tools)" : ""}`));
+          } else console.log(dim(`mode: ${config.mode} (use /plan or /code)`));
+          continue;
+        }
         case "system": {
           const sys = buildSystemPrompt(config);
           console.log(dim(`—— system prompt (${sys.length} chars, ~${Math.round(sys.length / 4)} tokens) ——`));
@@ -114,7 +242,7 @@ export async function replMain(flags: CliFlags) {
           const total = chars + sysChars;
           const pct = Math.round((total / config.contextBudgetChars) * 100);
           const roles = Object.entries(counts).map(([r, n]) => `${n} ${r}`).join(", ") || "empty";
-          console.log(dim(`session ${session.id}`));
+          console.log(dim(`session ${session.id} · mode ${config.mode}`));
           console.log(dim(`messages: ${session.history.length} (${roles})`));
           console.log(dim(`context: ~${Math.round(total / 4)} tokens (${total} chars incl. system) · ${pct}% of trim budget (${config.contextBudgetChars} chars)`));
           if (lastUsage) {
@@ -123,7 +251,7 @@ export async function replMain(flags: CliFlags) {
           continue;
         }
         default:
-          console.log(dim(`unknown command :${cmd}`));
+          console.log(dim(`unknown command ${input.split(/\s+/)[0]} — type / to see commands`));
           continue;
       }
     }
@@ -131,7 +259,7 @@ export async function replMain(flags: CliFlags) {
     ctrl = new AbortController();
     let mode: "none" | "reason" | "text" = "none";
     const md = new MdRenderer();
-    const active = new Map<string, string>(); // running tools: id → label
+    const active = new Map<string, string>();
     const totals = { prompt: 0, cached: 0, completion: 0, steps: 0 };
     const t0 = performance.now();
 
@@ -153,11 +281,12 @@ export async function replMain(flags: CliFlags) {
       spinner.stop();
       switch (e.type) {
         case "reasoning": {
+          if (!verbose) { stash(e.delta, true); break; }
           if (mode === "text") endSegment();
           let d = e.delta;
           if (mode !== "reason") {
             d = d.replace(/^\s+/, "");
-            if (!d) break; // don't print a dangling ✻ for whitespace-only reasoning
+            if (!d) break;
             process.stdout.write(dim("✻ "));
             mode = "reason";
           }
@@ -172,8 +301,13 @@ export async function replMain(flags: CliFlags) {
         case "tool_start": {
           endSegment();
           active.set(e.id, toolLabel(e.name, e.args));
-          const diff = renderDiff(e.name, e.args);
-          if (diff) process.stdout.write(diff);
+          if (config.mode !== "plan") {
+            const diff = renderDiff(e.name, e.args);
+            if (diff) {
+              if (verbose) process.stdout.write(diff);
+              else stash(diff, false);
+            }
+          }
           spinner.start(spinnerLabel());
           break;
         }
@@ -203,6 +337,7 @@ export async function replMain(flags: CliFlags) {
     };
 
     spinner.start("thinking");
+    if (process.stdin.isTTY) process.stdin.setRawMode(true);
     try {
       await runTurn(config, provider, session, input, emit, ctrl.signal);
     } catch {

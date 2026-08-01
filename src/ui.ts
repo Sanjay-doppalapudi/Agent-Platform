@@ -65,8 +65,11 @@ export function renderDiff(name: string, args: any, maxWidth?: number): string {
   const out: string[] = [];
 
   if (name === "edit") {
-    const oldL = String(args?.old ?? "").split("\n");
-    const newL = String(args?.new ?? "").split("\n");
+    const oldRaw = args?.old ?? args?.old_string ?? args?.oldText;
+    const newRaw = args?.new ?? args?.new_string ?? args?.newText;
+    if (!oldRaw && !newRaw) return ""; // malformed/hallucinated args — no empty box
+    const oldL = String(oldRaw ?? "").split("\n");
+    const newL = String(newRaw ?? "").split("\n");
     while (oldL.length && newL.length && oldL[0] === newL[0]) { oldL.shift(); newL.shift(); }
     while (oldL.length && newL.length && oldL[oldL.length - 1] === newL[newL.length - 1]) { oldL.pop(); newL.pop(); }
     out.push(`${DIM}╭ ${args?.path ?? ""}${R}`);

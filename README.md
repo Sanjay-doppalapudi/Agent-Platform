@@ -25,7 +25,29 @@ harness tool grep '{"pattern":"foo"}'   # run one tool directly (testing)
 harness run -p "task" --base-url https://api.example.com/v1 --api-key sk-... -m some-model
 ```
 
-Common flags: `--provider <name>` `-m/--model <id>` `--cwd <dir>` `--session <id>` `-c/--continue`.
+Common flags: `--provider <name>` `-m/--model <id>` `--cwd <dir>` `--session <id>` `-c/--continue` `--mode plan|code` (`--plan`).
+
+## Modes
+
+- **code** (default): all six tools, full write access.
+- **plan**: only `read`/`glob`/`grep` schemas are sent — the agent is structurally read-only and instructed to produce an implementation plan. Switch live in the REPL with `:plan` / `:code`. Mutating calls are also blocked server-side as a backstop. Each mode has its own stable prompt prefix, so caching works in both.
+
+## Install on another machine
+
+**Option A — compiled binary (no runtime needed):**
+`bun run dist` cross-compiles all four targets into `dist/` (windows-x64, linux-x64, darwin-arm64, darwin-x64). Copy the right binary, put it on PATH, install [ripgrep](https://github.com/BurntSushi/ripgrep) (`winget install BurntSushi.ripgrep.MSVC` / `brew install ripgrep` / `apt install ripgrep`), drop a config at `~/.harness/config.json`. Done.
+
+**Option B — from source (needs bun):**
+```sh
+git clone <repo> && cd harness
+bun install && bun link      # `harness` now on PATH via bun's global bin
+```
+
+**Option C — npm/bun registry:** rename the package to something unique (e.g. `@yourscope/harness`), `npm publish`, then `bun i -g @yourscope/harness` on any machine with bun (the shebang routes the bin through bun). For Homebrew, publish the `dist/` binaries as GitHub release assets and point a tap formula at them.
+
+## Sessions (no database)
+
+There is deliberately no database. Each session is one append-only JSONL file in `~/.harness/sessions/<id>.jsonl`: a `meta` line (cwd, model, timestamp) followed by one `msg` line per message, flushed on every append. Crash-safe (a torn last line is skipped on load), resumable (`--resume <id>`, `-c` for latest, `:resume` in REPL), inspectable with any text tool, and deleted by deleting the file (`DELETE /session/:id` in server mode does this).
 
 Compile a single-file exe (~45ms cold start):
 

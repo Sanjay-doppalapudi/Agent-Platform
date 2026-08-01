@@ -11,6 +11,7 @@ export interface CliFlags {
   apiKey?: string;
   cwd?: string;
   session?: string;
+  mode?: string;
   resume?: string;
   continue?: boolean;
   json?: boolean;
@@ -32,6 +33,8 @@ function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string
       case "--api-key": flags.apiKey = argv[++i]; break;
       case "--cwd": flags.cwd = argv[++i]; break;
       case "--session": flags.session = argv[++i]; break;
+      case "--mode": flags.mode = argv[++i]; break;
+      case "--plan": flags.mode = "plan"; break;
       case "--resume": flags.resume = argv[++i]; break;
       case "--continue": case "-c": flags.continue = true; break;
       case "--json": flags.json = true; break;
@@ -57,6 +60,8 @@ Usage:
   harness serve [--port 4141]  HTTP server mode
   harness tool <name> '<json>' run a single tool directly (testing)
   harness prompt [--cwd dir]   print the system prompt used for that directory
+  harness models [query]       search the models.dev catalog (providers + prices)
+  harness auth <provider>      store an API key securely (~/.harness/credentials.json)
 
 Flags:
   --provider <name>   named provider from config
@@ -65,6 +70,7 @@ Flags:
   --api-key <key>     API key override
   --cwd <dir>         working directory for the agent
   --session <id>      attach to session id
+  --mode <plan|code>  plan = read-only tools, produce a plan (also: --plan)
   --resume <id>       resume a saved session (REPL)
   -c, --continue      resume most recent session (REPL)
   --json              NDJSON event output (run mode)
@@ -111,6 +117,42 @@ switch (cmd) {
     const sys = buildSystemPrompt(loadConfig(flags));
     console.log(sys);
     console.error(`\n[${sys.length} chars, ~${Math.round(sys.length / 4)} tokens]`);
+    break;
+  }
+  case "models": {
+    const { loadConfig } = await import("./config.ts");
+    const { loadCatalog, searchModels } = await import("./models.ts");
+    const config = loadConfig(flags);
+    const catalog = await loadCatalog(config.dataDir);
+    const rows = searchModels(catalog, rest.join(" "));
+    if (!rows.length) { console.log("no matches"); break; }
+    for (const r of rows) {
+      const cost = r.inCost != null ? `$${r.inCost}/$${r.outCost ?? "?"} per M` : "";
+      const ctx = r.ctx ? `${Math.round(r.ctx / 1000)}k ctx` : "";
+      console.log(`${r.provider}/${r.model}  ${[ctx, cost].filter(Boolean).join(" · ")}`);
+    }
+    break;
+  }
+  case "auth": {
+    const { loadConfig } = await import("./config.ts");
+    const { listKeys, setKey } = await import("./creds.ts");
+    const config = loadConfig(flags);
+    const [prov, keyArg] = rest;
+    if (!prov) {
+      const stored = listKeys(config.dataDir);
+      console.log(stored.length ? `stored keys: ${stored.join(", ")}` : "no stored keys — usage: harness auth <provider> [key]");
+      break;
+    }
+    let key = keyArg;
+    if (!key) {
+      const { emitKeypressEvents } = await import("node:readline");
+      emitKeypressEvents(process.stdin);
+      const { readSecret } = await import("./input.ts");
+      key = await readSecret(`API key for ${prov}: `);
+    }
+    if (!key) { console.error("no key entered"); process.exit(1); }
+    setKey(config.dataDir, prov, key);
+    console.log(`stored key for "${prov}" in ${config.dataDir}\\credentials.json (user-only access)`);
     break;
   }
   case "": {

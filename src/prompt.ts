@@ -20,6 +20,12 @@ Rules:
 - For dev servers or long-running processes use bash with background:true.
 - When done, reply with a one-or-two-sentence result. Nothing else.`;
 
+  if (config.mode === "plan") {
+    prompt += `
+
+PLAN MODE: You have read-only tools. Explore the codebase, then produce a concrete implementation plan: files to change, what changes, in what order, and how to verify. Do not attempt modifications.`;
+  }
+
   const projectFile = join(config.cwd, "HARNESS.md");
   if (existsSync(projectFile)) {
     try {

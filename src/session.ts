@@ -53,6 +53,15 @@ export class Session {
     return s;
   }
 
+  static list(dataDir: string, limit = 10): { id: string; mtime: number }[] {
+    const dir = Session.dir(dataDir);
+    return readdirSync(dir)
+      .filter((f) => f.endsWith(".jsonl"))
+      .map((f) => ({ id: f.slice(0, -6), mtime: statSync(join(dir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime)
+      .slice(0, limit);
+  }
+
   static latest(dataDir: string): string | null {
     const dir = Session.dir(dataDir);
     let best: { id: string; mtime: number } | null = null;

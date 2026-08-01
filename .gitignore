@@ -1,4 +1,7 @@
 node_modules/
 harness.exe
+harness.exe.old*
+*.bun-build
+dist/
 harness.config.json
 *.log

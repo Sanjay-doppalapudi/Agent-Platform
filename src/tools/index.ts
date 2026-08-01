@@ -124,6 +124,16 @@ export const TOOL_SCHEMAS: ToolSchema[] = TOOLS.map((t) => ({
   function: { name: t.name, description: t.description, parameters: t.parameters },
 }));
 
+// Plan mode: read-only subset, same fixed order — its own stable cache prefix.
+const PLAN_SCHEMAS: ToolSchema[] = TOOLS.filter((t) => t.readOnly).map((t) => ({
+  type: "function" as const,
+  function: { name: t.name, description: t.description, parameters: t.parameters },
+}));
+
+export function toolSchemasFor(mode: "plan" | "code"): ToolSchema[] {
+  return mode === "plan" ? PLAN_SCHEMAS : TOOL_SCHEMAS;
+}
+
 export function getTool(name: string): ToolDef | undefined {
   return byName.get(name);
 }

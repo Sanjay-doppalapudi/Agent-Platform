@@ -5,7 +5,7 @@ import type { Config, ResolvedProvider } from "./config.ts";
 import { ProviderError, streamChat, type Msg } from "./provider.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import type { Session } from "./session.ts";
-import { execTool, getTool, TOOL_SCHEMAS } from "./tools/index.ts";
+import { execTool, getTool, toolSchemasFor } from "./tools/index.ts";
 import type { Usage } from "./stream.ts";
 
 export type AgentEvent =
@@ -50,7 +50,7 @@ export async function runTurn(
       res = await streamChat(
         provider,
         msgs,
-        TOOL_SCHEMAS,
+        toolSchemasFor(config.mode),
         (delta) => emit({ type: "text", delta }),
         signal,
         opts.extra,
@@ -87,7 +87,11 @@ export async function runTurn(
       try { args = JSON.parse(tc.function.arguments || "{}"); } catch {}
       emit({ type: "tool_start", id: tc.id, name: tc.function.name, args });
       const start = performance.now();
-      const r = await execTool(tc.function.name, tc.function.arguments, ctx);
+      // Plan mode is structurally read-only; block hallucinated mutations too.
+      const r =
+        config.mode === "plan" && !getTool(tc.function.name)?.readOnly
+          ? { output: "blocked: plan mode is read-only (switch to code mode to apply changes)", error: true }
+          : await execTool(tc.function.name, tc.function.arguments, ctx);
       const ms = Math.round(performance.now() - start);
       results[i] = { ...r, ms };
       emit({ type: "tool_end", id: tc.id, name: tc.function.name, output: r.output, ms, error: r.error });

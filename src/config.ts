@@ -3,6 +3,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { getKey } from "./creds.ts";
 import type { CliFlags } from "./index.ts";
 
 export interface ProviderEntry {
@@ -17,6 +18,7 @@ export interface ProviderEntry {
 export interface Config {
   provider: string;
   providers: Record<string, ProviderEntry>;
+  mode: "plan" | "code";
   permissions: "yolo" | "prompt";
   maxIterations: number;
   contextBudgetChars: number;
@@ -38,6 +40,7 @@ export interface ResolvedProvider {
 }
 
 const DEFAULTS: Omit<Config, "provider" | "providers" | "cwd"> = {
+  mode: "code",
   permissions: "yolo",
   maxIterations: 40,
   contextBudgetChars: 400_000,
@@ -85,6 +88,7 @@ export function loadConfig(flags: CliFlags): Config {
   merged.providers ??= {};
   merged.ignore ??= [];
   if (flags.provider) merged.provider = flags.provider;
+  if (flags.mode === "plan" || flags.mode === "code") merged.mode = flags.mode;
   return merged;
 }
 
@@ -115,10 +119,11 @@ export function resolveProvider(config: Config, flags: CliFlags): ResolvedProvid
     process.env.HARNESS_API_KEY ??
     entry.apiKey ??
     (entry.apiKeyEnv ? process.env[entry.apiKeyEnv] : undefined) ??
+    getKey(config.dataDir, name) ??
     "";
   if (!apiKey) {
     throw new Error(
-      `no API key for provider "${name}" (set ${entry.apiKeyEnv ?? "apiKey in config"} or --api-key)`,
+      `no API key for provider "${name}" — run: harness auth ${name}  (or set ${entry.apiKeyEnv ?? "--api-key"})`,
     );
   }
   const model = flags.model ?? process.env.HARNESS_MODEL ?? entry.model;
