@@ -67,29 +67,27 @@ export function renderDiff(name: string, args: any, maxWidth?: number): string {
   if (name === "edit") {
     const oldRaw = args?.old ?? args?.old_string ?? args?.oldText;
     const newRaw = args?.new ?? args?.new_string ?? args?.newText;
-    if (!oldRaw && !newRaw) return ""; // malformed/hallucinated args — no empty box
+    if (!oldRaw && !newRaw) return ""; // malformed/hallucinated args — no empty block
     const oldL = String(oldRaw ?? "").split("\n");
     const newL = String(newRaw ?? "").split("\n");
     while (oldL.length && newL.length && oldL[0] === newL[0]) { oldL.shift(); newL.shift(); }
     while (oldL.length && newL.length && oldL[oldL.length - 1] === newL[newL.length - 1]) { oldL.pop(); newL.pop(); }
-    out.push(`${DIM}╭ ${args?.path ?? ""}${R}`);
+    out.push(`${DIM}${args?.path ?? ""}${R}`);
     const o = capLines(oldL, 12);
     for (const l of o.shown) out.push(`${RED}- ${trunc(l, width)}${R}`);
     if (o.hidden) out.push(`${DIM}  … ${o.hidden} more removed lines${R}`);
     const n = capLines(newL, 12);
     for (const l of n.shown) out.push(`${GREEN}+ ${trunc(l, width)}${R}`);
     if (n.hidden) out.push(`${DIM}  … ${n.hidden} more added lines${R}`);
-    out.push(`${DIM}╰${R}`);
     return out.join("\n") + "\n";
   }
 
   if (name === "write") {
     const lines = String(args?.content ?? "").split("\n");
-    out.push(`${DIM}╭ ${args?.path ?? ""} · ${lines.length} lines${R}`);
+    out.push(`${DIM}${args?.path ?? ""} · new file · ${lines.length} lines${R}`);
     const c = capLines(lines, 12);
     for (const l of c.shown) out.push(`${GREEN}+ ${trunc(l, width)}${R}`);
     if (c.hidden) out.push(`${DIM}  … ${c.hidden} more lines${R}`);
-    out.push(`${DIM}╰${R}`);
     return out.join("\n") + "\n";
   }
 

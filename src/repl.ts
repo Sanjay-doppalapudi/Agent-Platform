@@ -17,6 +17,16 @@ const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
 
+// Accent bar marking agent-output lines (UI style C).
+const BAR = "\x1b[2;36m▌\x1b[0m ";
+/** Prefix every complete line in a streamed chunk with the accent bar. */
+const barify = (chunk: string): string => {
+  const parts = chunk.split("\n");
+  return parts
+    .map((l, i) => (i === parts.length - 1 ? l : l ? BAR + l : l))
+    .join("\n");
+};
+
 const COMMANDS: SlashCommand[] = [
   { name: "/plan", desc: "read-only mode: explore & produce a plan" },
   { name: "/code", desc: "full mode: all tools (default)" },
@@ -302,7 +312,7 @@ export async function replMain(flags: CliFlags) {
     const endSegment = () => {
       if (mode === "text") {
         const rest = md.flush();
-        if (rest) process.stdout.write(rest);
+        if (rest) process.stdout.write(BAR + rest); // partial last line starts fresh — needs the bar
       }
       if (mode !== "none") process.stdout.write("\n");
       mode = "none";
@@ -319,16 +329,16 @@ export async function replMain(flags: CliFlags) {
           if (mode !== "reason") {
             d = d.replace(/^\s+/, "");
             if (!d) break;
-            process.stdout.write(dim("✻ "));
+            process.stdout.write(BAR + dim("✻ "));
             mode = "reason";
           }
-          process.stdout.write(dim(d));
+          process.stdout.write(dim(d.replace(/\n/g, "\n▌ ")));
           break;
         }
         case "text":
           if (mode === "reason") process.stdout.write("\n\n");
           mode = "text";
-          process.stdout.write(md.push(e.delta));
+          process.stdout.write(barify(md.push(e.delta)));
           break;
         case "tool_start": {
           endSegment();
@@ -336,7 +346,7 @@ export async function replMain(flags: CliFlags) {
           if (config.mode !== "plan") {
             const diff = renderDiff(e.name, e.args);
             if (diff) {
-              if (verbose) process.stdout.write(diff);
+              if (verbose) process.stdout.write(barify(diff));
               else stash(diff, false);
             }
           }
@@ -348,7 +358,7 @@ export async function replMain(flags: CliFlags) {
           active.delete(e.id);
           const mark = e.error ? red("✗") : green("✓");
           const summary = toolSummary(e.name, e.output, e.error);
-          process.stdout.write(`${mark} ${label}${dim(` · ${summary} · ${e.ms}ms`)}\n`);
+          process.stdout.write(`${BAR}${mark} ${label}${dim(` · ${summary} · ${e.ms}ms`)}\n`);
           spinner.start(spinnerLabel());
           break;
         }
