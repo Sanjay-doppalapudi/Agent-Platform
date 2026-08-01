@@ -1,5 +1,5 @@
 // Interactive REPL: slash-command menu, streaming markdown render, ctrl+o
-// detail toggle (with retroactive reveal), ctrl+c aborts the turn.
+// detail toggle (true collapse/expand via in-place re-render), ctrl+c aborts.
 import { emitKeypressEvents } from "node:readline";
 import { loadConfig, resolveProvider } from "./config.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
@@ -17,15 +17,30 @@ const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
 
-// Accent bar marking agent-output lines (UI style C).
+// Accent bar marking agent-output lines.
 const BAR = "\x1b[2;36m▌\x1b[0m ";
-/** Prefix every complete line in a streamed chunk with the accent bar. */
 const barify = (chunk: string): string => {
   const parts = chunk.split("\n");
   return parts
     .map((l, i) => (i === parts.length - 1 ? l : l ? BAR + l : l))
     .join("\n");
 };
+
+const stripAnsi = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+/** Terminal rows above the cursor that a printed chunk occupies (wrap-aware). */
+function rowsUp(s: string): number {
+  const cols = Math.max(process.stdout.columns ?? 80, 20);
+  const parts = s.split("\n");
+  let rows = 0;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const len = stripAnsi(parts[i]!).length;
+    rows += 1 + Math.max(0, Math.ceil(len / cols) - 1);
+  }
+  const tail = stripAnsi(parts[parts.length - 1]!).length;
+  rows += Math.floor(tail / cols);
+  return rows;
+}
 
 const COMMANDS: SlashCommand[] = [
   { name: "/plan", desc: "read-only mode: explore & produce a plan" },
@@ -62,6 +77,91 @@ function makeSpinner() {
   };
 }
 
+const PLAN_GIST_LINES = 10;
+
+/**
+ * Renders AgentEvents to a string. Two instances run in parallel per turn —
+ * one including details (reasoning + diffs), one without — so ctrl+o can
+ * re-render the whole turn in either form at any moment.
+ */
+class TurnRenderer {
+  private md = new MdRenderer();
+  private mode: "none" | "reason" | "text" = "none";
+  private planLines = 0;
+  planTruncated = false;
+
+  constructor(
+    private details: boolean,
+    private planMode: boolean,
+  ) {}
+
+  feed(e: AgentEvent, label?: string): string {
+    switch (e.type) {
+      case "reasoning": {
+        if (!this.details) return "";
+        let out = "";
+        let d = e.delta;
+        if (this.mode === "text") out += this.endSegment();
+        if (this.mode !== "reason") {
+          d = d.replace(/^\s+/, "");
+          if (!d) return out;
+          out += BAR + dim("✻ ");
+          this.mode = "reason";
+        }
+        return out + dim(d.replace(/\n/g, "\n▌ "));
+      }
+      case "text": {
+        let out = "";
+        if (this.mode === "reason") out += "\n\n";
+        this.mode = "text";
+        const rendered = this.md.push(e.delta);
+        if (this.planMode) {
+          if (this.planTruncated) return out;
+          out += barify(rendered);
+          this.planLines += (rendered.match(/\n/g) ?? []).length;
+          if (this.planLines >= PLAN_GIST_LINES) {
+            this.planTruncated = true;
+            out += dim("▌ … full plan opens in the browser when done\n");
+          }
+        } else {
+          out += barify(rendered);
+        }
+        return out;
+      }
+      case "tool_start": {
+        let out = this.endSegment();
+        if (this.details && !this.planMode) {
+          const diff = renderDiff(e.name, e.args);
+          if (diff) out += barify(diff);
+        }
+        return out;
+      }
+      case "tool_end": {
+        const mark = e.error ? red("✗") : green("✓");
+        const summary = toolSummary(e.name, e.output, e.error);
+        return `${BAR}${mark} ${label ?? e.name}${dim(` · ${summary} · ${e.ms}ms`)}\n`;
+      }
+      case "turn_end":
+        return this.endSegment();
+      case "error":
+        return `\n${dim("error:")} ${e.message}\n`;
+      default:
+        return "";
+    }
+  }
+
+  endSegment(): string {
+    let out = "";
+    if (this.mode === "text") {
+      const rest = this.md.flush();
+      if (rest && !this.planTruncated) out += BAR + rest;
+    }
+    if (this.mode !== "none") out += "\n";
+    this.mode = "none";
+    return out;
+  }
+}
+
 export async function replMain(flags: CliFlags) {
   const config = loadConfig(flags);
   let provider = resolveProvider(config, flags);
@@ -85,64 +185,52 @@ export async function replMain(flags: CliFlags) {
 
   let lastUsage: Usage | undefined;
   let verbose = true;
-  let lastPlan: string | null = null; // most recent plan-mode output
-  let planArmed = false;              // attach the plan to the next code-mode message
+  let lastPlan: string | null = null;
+  let planArmed = false;
   const spinner = makeSpinner();
   const history: string[] = [];
 
-  // Details hidden by ctrl+o are buffered (capped) and replayed on toggle-on.
-  const hidden: string[] = [];
-  let hiddenBytes = 0;
-  let hiddenLastWasReason = false;
-  const stash = (text: string, isReason: boolean) => {
-    if (isReason && !hiddenLastWasReason) hidden.push("\n✻ ");
-    hiddenLastWasReason = isReason;
-    hidden.push(text);
-    hiddenBytes += text.length;
-    while (hiddenBytes > 60_000 && hidden.length) {
-      hiddenBytes -= hidden[0]!.length;
-      hidden.shift();
-    }
-  };
-  // Rows the last reveal block occupies on screen (wrap-aware); 0 = nothing
-  // erasable. Invalidated the moment anything else prints.
-  let revealRows = 0;
-  const rowsAdvanced = (s: string): number => {
-    const cols = Math.max(process.stdout.columns ?? 80, 20);
-    const parts = s.split("\n");
-    let rows = 0;
-    for (let i = 0; i < parts.length - 1; i++) {
-      const len = parts[i]!.replace(/\x1b\[[0-9;]*m/g, "").length;
-      rows += 1 + Math.max(0, Math.ceil(len / cols) - 1);
-    }
-    return rows;
-  };
-  const toggleVerbose = () => {
+  // Turn buffers: what a full render looks like, what a compact render looks
+  // like, and what is actually on screen right now. ctrl+o erases the on-
+  // screen block (cursor-up + clear) and prints the other form.
+  let fullBuf = "";
+  let compactBuf = "";
+  let printedBuf = "";
+
+  let ctrl: AbortController | null = null;
+
+  const toggleVerbose = (atPrompt: boolean) => {
     verbose = !verbose;
-    if (verbose) {
-      if (hidden.length) {
-        const block =
-          `\n${dim("[details on — ctrl+o hides them again]")}\n` +
-          dim(hidden.join("").replace(/^\n+/, "")) + "\n";
-        process.stdout.write(block);
-        revealRows = rowsAdvanced(block);
-      } else {
-        process.stdout.write(`\n${dim("[details on — reasoning & diffs shown]")}\n`);
-        revealRows = 0;
-      }
-    } else {
-      if (revealRows > 0) {
-        process.stdout.write(`\x1b[${revealRows}A\r\x1b[J`); // erase the reveal in place
-        revealRows = 0;
-      } else {
-        process.stdout.write(`\n${dim("[details off — tool lines only]")}\n`);
-      }
+    spinner.stop();
+    const target = verbose ? fullBuf : compactBuf;
+    const up = rowsUp(printedBuf) + (atPrompt ? 1 : 0); // +1: blank line before prompt
+    const termRows = process.stdout.rows ?? 30;
+
+    if (!printedBuf && !target) {
+      // nothing rendered this turn yet — just confirm the flip
+      const s = `${dim(`[details ${verbose ? "on" : "off"}]`)}\n`;
+      process.stdout.write(s);
+      printedBuf += s;
+      return;
     }
+    if (up > termRows - 1) {
+      const s = `\n${dim(`[details ${verbose ? "on" : "off"} — turn too tall to re-render in place; applies to new output]`)}\n`;
+      process.stdout.write(s);
+      printedBuf += s;
+      return;
+    }
+    if (up > 0) process.stdout.write(`\x1b[${up}A`);
+    process.stdout.write(`\r\x1b[J${target}`);
+    printedBuf = target;
+    if (fullBuf === compactBuf) {
+      const n = `${dim("[no hidden details in this turn]")}\n`;
+      process.stdout.write(n);
+      printedBuf += n;
+    }
+    if (atPrompt) process.stdout.write("\n"); // restore the blank line before the prompt
   };
 
   emitKeypressEvents(process.stdin);
-
-  let ctrl: AbortController | null = null;
   const abortTurn = () => {
     if (ctrl && !ctrl.signal.aborted) {
       ctrl.abort();
@@ -152,7 +240,7 @@ export async function replMain(flags: CliFlags) {
   // During a turn (readLine not active) handle ctrl+o / ctrl+c ourselves.
   process.stdin.on("keypress", (_s, key) => {
     if (!key?.ctrl || !ctrl) return;
-    if (key.name === "o") toggleVerbose();
+    if (key.name === "o") toggleVerbose(false);
     else if (key.name === "c") abortTurn();
   });
 
@@ -163,15 +251,15 @@ export async function replMain(flags: CliFlags) {
 
   for (;;) {
     const promptLabel = `${dim(config.mode)} ${cyan("›")} `;
-    process.stdout.write("\n"); // once — NOT inside the prompt, which re-renders per keypress
+    process.stdout.write("\n");
     const input = (await readLine({
       prompt: promptLabel,
       commands: COMMANDS,
       history,
-      onCtrlO: toggleVerbose,
+      onCtrlO: () => toggleVerbose(true),
     }))?.trim();
 
-    if (input === null || input === undefined) exit(0); // ctrl+c at empty prompt
+    if (input === null || input === undefined) exit(0);
     if (!input) continue;
     history.push(input);
 
@@ -210,7 +298,6 @@ export async function replMain(flags: CliFlags) {
           const pfx = arg.slice(0, slash);
           const modelId = arg.slice(slash + 1);
           if (pfx === provider.name) {
-            // "opencode-go/minimax-m3" on the opencode-go provider → bare id
             provider = { ...provider, model: modelId };
             console.log(dim(`model → ${provider.model}`));
           } else if (config.providers[pfx]) {
@@ -219,7 +306,6 @@ export async function replMain(flags: CliFlags) {
               console.log(dim(`provider → ${pfx}, model → ${modelId}`));
             } catch (e) { console.log(dim((e as Error).message)); }
           } else {
-            // unknown provider → try the models.dev catalog
             try {
               const { loadCatalog, providerBaseUrl, envKeyFor } = await import("./models.ts");
               const { getKey } = await import("./creds.ts");
@@ -300,12 +386,19 @@ export async function replMain(flags: CliFlags) {
       }
     }
 
+    let userText = input;
+    if (planArmed && lastPlan && config.mode === "code") {
+      userText += `\n\n<approved_plan>\n${lastPlan}\n</approved_plan>\nIf this message asks to implement the plan above, follow it EXACTLY — every step in order, nothing added, nothing skipped, no improvisation. If a step turns out to be impossible, stop and report instead of deviating.`;
+      planArmed = false;
+      process.stdout.write(dim("[plan attached — following it exactly]\n"));
+    }
+
     ctrl = new AbortController();
-    let mode: "none" | "reason" | "text" = "none";
-    let planLines = 0;          // gist budget for plan-mode answers
-    let planTruncated = false;  // rest of the plan goes to the browser only
-    const PLAN_GIST_LINES = 10;
-    const md = new MdRenderer();
+    const planMode = config.mode === "plan";
+    const fullR = new TurnRenderer(true, planMode);
+    const compactR = new TurnRenderer(false, planMode);
+    fullBuf = ""; compactBuf = ""; printedBuf = "";
+
     const active = new Map<string, string>();
     const totals = { prompt: 0, cached: 0, completion: 0, steps: 0 };
     const t0 = performance.now();
@@ -315,97 +408,44 @@ export async function replMain(flags: CliFlags) {
       active.size === 1 ? [...active.values()][0]! :
       `${active.size} tools running`;
 
-    const endSegment = () => {
-      if (mode === "text") {
-        const rest = md.flush();
-        if (rest && !planTruncated) process.stdout.write(BAR + rest); // partial last line starts fresh — needs the bar
-      }
-      if (mode !== "none") process.stdout.write("\n");
-      mode = "none";
+    const writeBoth = (s: string) => {
+      fullBuf += s; compactBuf += s;
+      process.stdout.write(s);
+      printedBuf += s;
     };
 
     const emit = (e: AgentEvent) => {
       spinner.stop();
-      revealRows = 0; // new output below a reveal — it can no longer be erased in place
-      switch (e.type) {
-        case "reasoning": {
-          if (!verbose) { stash(e.delta, true); break; }
-          if (mode === "text") endSegment();
-          let d = e.delta;
-          if (mode !== "reason") {
-            d = d.replace(/^\s+/, "");
-            if (!d) break;
-            process.stdout.write(BAR + dim("✻ "));
-            mode = "reason";
-          }
-          process.stdout.write(dim(d.replace(/\n/g, "\n▌ ")));
-          break;
+      let label: string | undefined;
+      if (e.type === "tool_start") {
+        label = toolLabel(e.name, e.args);
+        active.set(e.id, label);
+      } else if (e.type === "tool_end") {
+        label = active.get(e.id) ?? e.name;
+        active.delete(e.id);
+      } else if (e.type === "turn_end") {
+        totals.steps++;
+        if (e.usage) {
+          lastUsage = e.usage;
+          totals.prompt += e.usage.prompt;
+          totals.cached += e.usage.cached ?? 0;
+          totals.completion += e.usage.completion;
         }
-        case "text": {
-          if (mode === "reason") process.stdout.write("\n\n");
-          mode = "text";
-          const rendered = md.push(e.delta);
-          if (config.mode === "plan") {
-            if (planTruncated) { spinner.start("writing plan…"); break; }
-            process.stdout.write(barify(rendered));
-            planLines += (rendered.match(/\n/g) ?? []).length;
-            if (planLines >= PLAN_GIST_LINES) {
-              planTruncated = true;
-              process.stdout.write(dim("▌ … full plan opens in the browser when done\n"));
-              spinner.start("writing plan…");
-            }
-          } else {
-            process.stdout.write(barify(rendered));
-          }
-          break;
-        }
-        case "tool_start": {
-          endSegment();
-          active.set(e.id, toolLabel(e.name, e.args));
-          if (config.mode !== "plan") {
-            const diff = renderDiff(e.name, e.args);
-            if (diff) {
-              if (verbose) process.stdout.write(barify(diff));
-              else stash(diff, false);
-            }
-          }
-          spinner.start(spinnerLabel());
-          break;
-        }
-        case "tool_end": {
-          const label = active.get(e.id) ?? e.name;
-          active.delete(e.id);
-          const mark = e.error ? red("✗") : green("✓");
-          const summary = toolSummary(e.name, e.output, e.error);
-          process.stdout.write(`${BAR}${mark} ${label}${dim(` · ${summary} · ${e.ms}ms`)}\n`);
-          spinner.start(spinnerLabel());
-          break;
-        }
-        case "turn_end":
-          endSegment();
-          totals.steps++;
-          if (e.usage) {
-            lastUsage = e.usage;
-            totals.prompt += e.usage.prompt;
-            totals.cached += e.usage.cached ?? 0;
-            totals.completion += e.usage.completion;
-          }
-          break;
-        case "error":
-          process.stdout.write(`\n${dim("error:")} ${e.message}\n`);
-          break;
       }
+
+      const fullChunk = fullR.feed(e, label);
+      const compactChunk = compactR.feed(e, label);
+      fullBuf += fullChunk;
+      compactBuf += compactChunk;
+      const live = verbose ? fullChunk : compactChunk;
+      if (live) {
+        process.stdout.write(live);
+        printedBuf += live;
+      }
+
+      if (e.type === "tool_start" || e.type === "tool_end") spinner.start(spinnerLabel());
+      else if (e.type === "text" && planMode && fullR.planTruncated) spinner.start("writing plan…");
     };
-
-    // Fresh turn: old hidden details no longer apply.
-    hidden.length = 0; hiddenBytes = 0; hiddenLastWasReason = false; revealRows = 0;
-
-    let userText = input;
-    if (planArmed && lastPlan && config.mode === "code") {
-      userText += `\n\n<approved_plan>\n${lastPlan}\n</approved_plan>\nIf this message asks to implement the plan above, follow it EXACTLY — every step in order, nothing added, nothing skipped, no improvisation. If a step turns out to be impossible, stop and report instead of deviating.`;
-      planArmed = false;
-      process.stdout.write(dim("[plan attached — following it exactly]\n"));
-    }
 
     spinner.start("thinking");
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
@@ -419,7 +459,7 @@ export async function replMain(flags: CliFlags) {
       ctrl = null;
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       const cached = totals.cached ? ` (${totals.cached} cached)` : "";
-      process.stdout.write(dim(`\n${totals.steps} step${totals.steps === 1 ? "" : "s"} · ↑${totals.prompt}${cached} ↓${totals.completion} · ${secs}s\n`));
+      writeBoth(dim(`\n${totals.steps} step${totals.steps === 1 ? "" : "s"} · ↑${totals.prompt}${cached} ↓${totals.completion} · ${secs}s\n`));
     }
 
     if (config.mode === "plan" && finalText.trim()) {
@@ -429,9 +469,9 @@ export async function replMain(flags: CliFlags) {
           const { exportPlanHtml, openInBrowser } = await import("./planview.ts");
           const planPath = exportPlanHtml(finalText, provider.model, config.cwd, session.id);
           openInBrowser(planPath);
-          process.stdout.write(dim(`plan → ${planPath} (opened in browser) · /code to implement it exactly\n`));
+          writeBoth(dim(`plan → ${planPath} (opened in browser) · /code to implement it exactly\n`));
         } catch (e) {
-          process.stdout.write(dim(`plan export failed: ${(e as Error).message}\n`));
+          writeBoth(dim(`plan export failed: ${(e as Error).message}\n`));
         }
       }
     }
