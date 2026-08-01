@@ -77,7 +77,9 @@ function makeSpinner() {
   };
 }
 
-const PLAN_GIST_LINES = 10;
+// A plan longer than this gets truncated in the terminal AND exported to an
+// interactive HTML page — one threshold drives both decisions.
+const PLAN_GIST_LINES = 30;
 
 /**
  * Renders AgentEvents to a string. Two instances run in parallel per turn —
@@ -121,7 +123,7 @@ class TurnRenderer {
           this.planLines += (rendered.match(/\n/g) ?? []).length;
           if (this.planLines >= PLAN_GIST_LINES) {
             this.planTruncated = true;
-            out += dim("▌ … full plan opens in the browser when done\n");
+            out += dim("▌ … long plan — the full version opens in the browser when done\n");
           }
         } else {
           out += barify(rendered);
@@ -214,9 +216,12 @@ export async function replMain(flags: CliFlags) {
       return;
     }
     if (up > termRows - 1) {
-      const s = `\n${dim(`[details ${verbose ? "on" : "off"} — turn too tall to re-render in place; applies to new output]`)}\n`;
-      process.stdout.write(s);
-      printedBuf += s;
+      // Taller than the viewport: in-place erase is impossible, so clear the
+      // visible screen and redraw the turn in the target form (older output
+      // stays in scrollback).
+      process.stdout.write(`\x1b[2J\x1b[H${target}`);
+      printedBuf = target;
+      if (atPrompt) process.stdout.write("\n");
       return;
     }
     if (up > 0) process.stdout.write(`\x1b[${up}A`);
@@ -464,7 +469,10 @@ export async function replMain(flags: CliFlags) {
 
     if (config.mode === "plan" && finalText.trim()) {
       lastPlan = finalText;
-      if (finalText.length > 150) {
+      // Export only when the plan outgrew the terminal, or the user asked
+      // for a page — short plans just print inline.
+      const wantsHtml = /\b(html|browser|page)\b/i.test(input);
+      if (fullR.planTruncated || wantsHtml) {
         try {
           const { exportPlanHtml, openInBrowser } = await import("./planview.ts");
           const planPath = exportPlanHtml(finalText, provider.model, config.cwd, session.id);
@@ -473,6 +481,8 @@ export async function replMain(flags: CliFlags) {
         } catch (e) {
           writeBoth(dim(`plan export failed: ${(e as Error).message}\n`));
         }
+      } else {
+        writeBoth(dim(`plan ready · /code to implement it exactly\n`));
       }
     }
   }
