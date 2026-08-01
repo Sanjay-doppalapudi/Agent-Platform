@@ -68,7 +68,7 @@ export async function replMain(flags: CliFlags) {
     session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
   }
 
-  console.log(`${cyan("◆")} ${bold("harness")} ${dim("·")} ${provider.name}/${provider.model}`);
+  console.log(`${cyan("◆")} ${bold("AP")} ${dim("·")} ${provider.name}/${provider.model}`);
   console.log(dim(`  cwd ${config.cwd}`));
   console.log(dim(`  session ${session.id} · type / for commands · ctrl+o details · ctrl+c abort`));
 
@@ -120,7 +120,7 @@ export async function replMain(flags: CliFlags) {
   });
 
   const exit = (code = 0): never => {
-    console.log(dim(`\nsession ${session.id} — resume with: harness --resume ${session.id}`));
+    console.log(dim(`\nsession ${session.id} — resume with: ap --resume ${session.id}`));
     process.exit(code);
   };
 
@@ -193,7 +193,7 @@ export async function replMain(flags: CliFlags) {
               }
               const key = envKeyFor(cp) ?? getKey(config.dataDir, pfx);
               if (!key) {
-                console.log(dim(`no key for ${pfx} — run: harness auth ${pfx}  (env: ${cp.env?.join("/") ?? "none listed"})`));
+                console.log(dim(`no key for ${pfx} — run: ap auth ${pfx}  (env: ${cp.env?.join("/") ?? "none listed"})`));
                 continue;
               }
               provider = { name: pfx, baseUrl, apiKey: key, model: modelId, cacheControl: false, headers: {} };

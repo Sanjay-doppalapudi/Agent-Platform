@@ -52,16 +52,16 @@ function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string
 }
 
 function printHelp() {
-  console.log(`harness ${VERSION} — minimal fast coding agent
+  console.log(`AP (Agent Platform) ${VERSION} — minimal fast coding agent
 
 Usage:
-  harness                      interactive REPL
-  harness run -p "task"        one-shot run (--json for NDJSON events)
-  harness serve [--port 4141]  HTTP server mode
-  harness tool <name> '<json>' run a single tool directly (testing)
-  harness prompt [--cwd dir]   print the system prompt used for that directory
-  harness models [query]       search the models.dev catalog (providers + prices)
-  harness auth <provider>      store an API key securely (~/.harness/credentials.json)
+  ap                      interactive REPL
+  ap run -p "task"        one-shot run (--json for NDJSON events)
+  ap serve [--port 4141]  HTTP server mode
+  ap tool <name> '<json>' run a single tool directly (testing)
+  ap prompt [--cwd dir]   print the system prompt used for that directory
+  ap models [query]       search the models.dev catalog (providers + prices)
+  ap auth <provider>      store an API key securely (data dir credentials.json)
 
 Flags:
   --provider <name>   named provider from config

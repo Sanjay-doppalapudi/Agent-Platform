@@ -1,5 +1,6 @@
 // Config loading + provider resolution.
-// Precedence: CLI flags > env vars > ./harness.config.json (walked upward) > ~/.harness/config.json
+// Precedence: CLI flags > env vars > ./ap.config.json (walked upward, legacy
+// harness.config.json accepted) > <dataDir>/config.json
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -39,6 +40,14 @@ export interface ResolvedProvider {
   headers: Record<string, string>;
 }
 
+/** ~/.ap for fresh installs; existing ~/.harness dirs keep working. */
+function defaultDataDir(): string {
+  const ap = join(homedir(), ".ap");
+  if (existsSync(ap)) return ap;
+  const legacy = join(homedir(), ".harness");
+  return existsSync(legacy) ? legacy : ap;
+}
+
 const DEFAULTS: Omit<Config, "provider" | "providers" | "cwd"> = {
   mode: "code",
   permissions: "yolo",
@@ -48,7 +57,7 @@ const DEFAULTS: Omit<Config, "provider" | "providers" | "cwd"> = {
   shell: "auto",
   parallelPolicy: "safe",
   ignore: [],
-  dataDir: join(homedir(), ".harness"),
+  dataDir: defaultDataDir(),
 };
 
 function readJson(path: string): Record<string, unknown> | null {
@@ -61,11 +70,11 @@ function readJson(path: string): Record<string, unknown> | null {
   }
 }
 
-/** Walk upward from cwd looking for harness.config.json. */
+/** Walk upward from cwd looking for ap.config.json (or legacy harness.config.json). */
 function findProjectConfig(startDir: string): Record<string, unknown> | null {
   let dir = resolve(startDir);
   for (let i = 0; i < 20; i++) {
-    const found = readJson(join(dir, "harness.config.json"));
+    const found = readJson(join(dir, "ap.config.json")) ?? readJson(join(dir, "harness.config.json"));
     if (found) return found;
     const parent = dirname(dir);
     if (parent === dir) break;
@@ -80,7 +89,7 @@ function expandHome(p: string): string {
 
 export function loadConfig(flags: CliFlags): Config {
   const cwd = resolve(flags.cwd ?? process.cwd());
-  const home = readJson(join(homedir(), ".harness", "config.json")) ?? {};
+  const home = readJson(join(defaultDataDir(), "config.json")) ?? {};
   const project = findProjectConfig(cwd) ?? {};
   const merged = { ...DEFAULTS, provider: "", providers: {}, ...home, ...project } as unknown as Config;
   merged.cwd = cwd;
@@ -111,7 +120,7 @@ export function resolveProvider(config: Config, flags: CliFlags): ResolvedProvid
     const known = Object.keys(config.providers).join(", ") || "(none configured)";
     throw new Error(
       `provider "${name || "(unset)"}" not found. Known providers: ${known}. ` +
-      `Set one in harness.config.json or pass --base-url/--api-key.`,
+      `Set one in ap.config.json or pass --base-url/--api-key.`,
     );
   }
   const apiKey =
@@ -123,7 +132,7 @@ export function resolveProvider(config: Config, flags: CliFlags): ResolvedProvid
     "";
   if (!apiKey) {
     throw new Error(
-      `no API key for provider "${name}" — run: harness auth ${name}  (or set ${entry.apiKeyEnv ?? "--api-key"})`,
+      `no API key for provider "${name}" — run: ap auth ${name}  (or set ${entry.apiKeyEnv ?? "--api-key"})`,
     );
   }
   const model = flags.model ?? process.env.HARNESS_MODEL ?? entry.model;

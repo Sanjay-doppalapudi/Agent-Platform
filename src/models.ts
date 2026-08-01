@@ -77,7 +77,7 @@ export function searchModels(catalog: Catalog, query: string, limit = 30): Model
  * Chat-completions base URL for a catalog provider. models.dev `api` values
  * vary (some include /v1, some don't) — append /v1 when no version segment
  * is present. Best-effort: assumes an OpenAI-compatible endpoint; users can
- * pin an exact baseUrl in harness.config.json when the heuristic is wrong.
+ * pin an exact baseUrl in ap.config.json when the heuristic is wrong.
  */
 export function providerBaseUrl(prov: CatalogProvider): string | null {
   if (!prov.api) return null;

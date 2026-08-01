@@ -26,12 +26,15 @@ Rules:
 PLAN MODE: You have read-only tools. Explore the codebase, then produce a concrete implementation plan: files to change, what changes, in what order, and how to verify. Do not attempt modifications.`;
   }
 
-  const projectFile = join(config.cwd, "HARNESS.md");
-  if (existsSync(projectFile)) {
-    try {
-      const extra = readFileSync(projectFile, "utf8").trim();
-      if (extra) prompt += `\n\nProject notes:\n${extra}`;
-    } catch {}
+  for (const name of ["AP.md", "HARNESS.md"]) {
+    const projectFile = join(config.cwd, name);
+    if (existsSync(projectFile)) {
+      try {
+        const extra = readFileSync(projectFile, "utf8").trim();
+        if (extra) prompt += `\n\nProject notes:\n${extra}`;
+      } catch {}
+      break;
+    }
   }
   return prompt;
 }

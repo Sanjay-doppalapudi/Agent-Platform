@@ -1,4 +1,4 @@
-// `harness tool <name> '<json>'` — direct tool tester.
+// `ap tool <name> '<json>'` — direct tool tester.
 import { loadConfig } from "./config.ts";
 import { execTool } from "./tools/index.ts";
 import type { CliFlags } from "./index.ts";
@@ -6,7 +6,7 @@ import type { CliFlags } from "./index.ts";
 export async function toolMain(flags: CliFlags, rest: string[]) {
   const [name, json] = rest;
   if (!name) {
-    console.error(`usage: harness tool <name> '<json-args>'`);
+    console.error(`usage: ap tool <name> '<json-args>'`);
     process.exit(1);
   }
   const config = loadConfig(flags);

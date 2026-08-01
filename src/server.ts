@@ -152,5 +152,5 @@ export async function serveMain(flags: CliFlags) {
     },
   });
 
-  console.log(`harness serving on http://localhost:${server.port} · ${provider.name}/${provider.model}`);
+  console.log(`AP serving on http://localhost:${server.port} · ${provider.name}/${provider.model}`);
 }

@@ -1,4 +1,4 @@
-// One-shot headless mode: `harness run -p "task" [--json]`
+// One-shot headless mode: `ap run -p "task" [--json]`
 // --json → one AgentEvent per line (NDJSON) on stdout.
 import { loadConfig, resolveProvider } from "./config.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
@@ -9,7 +9,7 @@ import type { CliFlags } from "./index.ts";
 
 export async function runMain(flags: CliFlags) {
   if (!flags.prompt) {
-    console.error(`usage: harness run -p "task" [--json] [--session id]`);
+    console.error(`usage: ap run -p "task" [--json] [--session id]`);
     process.exit(1);
   }
   const config = loadConfig(flags);

@@ -1,0 +1,30 @@
+{
+  "provider": "opencode-go",
+  "providers": {
+    "opencode-go": {
+      "baseUrl": "https://opencode.ai/zen/go/v1",
+      "apiKeyEnv": "OPENCODE_API_KEY",
+      "model": "minimax-m3"
+    },
+    "openrouter": {
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "apiKeyEnv": "OPENROUTER_API_KEY",
+      "model": "anthropic/claude-sonnet-4.5",
+      "cacheControl": true,
+      "headers": { "HTTP-Referer": "https://localhost", "X-Title": "harness" }
+    },
+    "nim": {
+      "baseUrl": "https://integrate.api.nvidia.com/v1",
+      "apiKeyEnv": "NVIDIA_API_KEY",
+      "model": "qwen/qwen3-coder-480b-a35b-instruct"
+    }
+  },
+  "permissions": "yolo",
+  "maxIterations": 40,
+  "contextBudgetChars": 400000,
+  "redactEnv": true,
+  "shell": "auto",
+  "parallelPolicy": "safe",
+  "ignore": [],
+  "dataDir": "~/.harness"
+}
