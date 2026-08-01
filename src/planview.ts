@@ -1,7 +1,7 @@
 // Plan export: renders a plan as a self-contained interactive HTML page
 // (checkable steps + progress bar) in the OS temp dir and opens it in the
 // default browser. Loaded lazily — never on the startup path.
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -101,9 +101,11 @@ prog();
 </script></body></html>`;
 }
 
-export function exportPlanHtml(plan: string, model: string, cwd: string): string {
+export function exportPlanHtml(plan: string, model: string, cwd: string, sessionId: string): string {
+  const dir = join(tmpdir(), ".ap", sessionId);
+  mkdirSync(dir, { recursive: true });
   const name = randomName();
-  const path = join(tmpdir(), `${name}.html`);
+  const path = join(dir, `${name}.html`);
   writeFileSync(path, renderPage(plan, model, cwd, name));
   return path;
 }

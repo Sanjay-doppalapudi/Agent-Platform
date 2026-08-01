@@ -17,6 +17,7 @@ export async function runMain(flags: CliFlags) {
   const session = flags.session
     ? Session.load(config.dataDir, flags.session)
     : Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
+  config.sessionId = session.id;
 
   const json = !!flags.json;
   const md = !json && process.stdout.isTTY ? new MdRenderer() : null;

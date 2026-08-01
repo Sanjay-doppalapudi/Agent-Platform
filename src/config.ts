@@ -29,6 +29,8 @@ export interface Config {
   ignore: string[];
   dataDir: string;
   cwd: string;
+  /** Set by the front-end once a session exists — scopes the plans folder. */
+  sessionId?: string;
 }
 
 export interface ResolvedProvider {

@@ -125,7 +125,7 @@ export async function serveMain(flags: CliFlags) {
           };
           if (!body.text) return json({ error: "text required" }, 400);
 
-          const config = { ...baseConfig, cwd: live.cwd };
+          const config = { ...baseConfig, cwd: live.cwd, sessionId: id };
           const prov = body.model ? { ...provider, model: body.model } : provider;
           const extra = body.response_format ? { response_format: body.response_format } : undefined;
 

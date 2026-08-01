@@ -1,10 +1,28 @@
 // System prompt builder. Byte-stable per (cwd, shell, HARNESS.md content) —
 // no dates, no dynamic ordering — so provider-side prefix caching hits from
 // turn 2 onward. Target < 2K tokens including tool schemas.
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./config.ts";
 import { shellPrefix } from "./tools/bash.ts";
+
+const MEMORY_CHAR_CAP = 2000;
+
+/** Concatenated saved memories, capped — stable bytes while files are unchanged. */
+function readMemories(memDir: string): string {
+  let out = "";
+  try {
+    for (const f of readdirSync(memDir).sort()) {
+      if (!f.endsWith(".md")) continue;
+      out += readFileSync(join(memDir, f), "utf8").trim() + "\n---\n";
+      if (out.length > MEMORY_CHAR_CAP) {
+        return out.slice(0, MEMORY_CHAR_CAP) + "\n[more memories truncated]";
+      }
+    }
+  } catch {}
+  return out;
+}
 
 export function buildSystemPrompt(config: Config): string {
   const shell = shellPrefix(config.shell)[0]!.includes("bash") ? "Git Bash" : "PowerShell";
@@ -24,6 +42,18 @@ Rules:
     prompt += `
 
 PLAN MODE: You have read-only tools. Explore the codebase, then produce a concrete implementation plan: files to change, what changes, in what order, and how to verify. Do not attempt modifications.`;
+  }
+
+  const memDir = join(config.dataDir, "memory");
+  prompt += `
+
+Memory: when the user corrects you or wants something different from what you did, save it — write ${memDir}\\<short-slug>.md with exactly three lines: "Title: …", "User wanted: …", "Why (guess): …". Consult the saved memories below before repeating a choice the user disliked.`;
+  const memories = readMemories(memDir);
+  if (memories) prompt += `\n\nSaved user preferences:\n${memories}`;
+
+  if (config.sessionId) {
+    const plansDir = join(tmpdir(), ".ap", config.sessionId);
+    prompt += `\n\nPlans from this session are saved as HTML in ${plansDir} — read earlier ones from there when useful. Folders of other sessions are strictly off-limits.`;
   }
 
   for (const name of ["AP.md", "HARNESS.md"]) {

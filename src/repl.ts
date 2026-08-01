@@ -78,6 +78,7 @@ export async function replMain(flags: CliFlags) {
     session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
   }
 
+  config.sessionId = session.id;
   console.log(`${cyan("◆")} ${bold("AP")} ${dim("·")} ${provider.name}/${provider.model}`);
   console.log(dim(`  cwd ${config.cwd}`));
   console.log(dim(`  session ${session.id} · type / for commands · ctrl+o details · ctrl+c abort`));
@@ -180,11 +181,13 @@ export async function replMain(flags: CliFlags) {
         case "exit": case "q": case "quit": exit(0);
         case "new":
           session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
+          config.sessionId = session.id;
           console.log(dim(`new session ${session.id}`));
           continue;
         case "resume":
           try {
             session = Session.load(config.dataDir, rest[0] ?? "");
+            config.sessionId = session.id;
             console.log(dim(`resumed ${session.id} (${session.history.length} msgs)`));
           } catch (e) { console.log(dim((e as Error).message)); }
           continue;
@@ -299,6 +302,9 @@ export async function replMain(flags: CliFlags) {
 
     ctrl = new AbortController();
     let mode: "none" | "reason" | "text" = "none";
+    let planLines = 0;          // gist budget for plan-mode answers
+    let planTruncated = false;  // rest of the plan goes to the browser only
+    const PLAN_GIST_LINES = 10;
     const md = new MdRenderer();
     const active = new Map<string, string>();
     const totals = { prompt: 0, cached: 0, completion: 0, steps: 0 };
@@ -312,7 +318,7 @@ export async function replMain(flags: CliFlags) {
     const endSegment = () => {
       if (mode === "text") {
         const rest = md.flush();
-        if (rest) process.stdout.write(BAR + rest); // partial last line starts fresh — needs the bar
+        if (rest && !planTruncated) process.stdout.write(BAR + rest); // partial last line starts fresh — needs the bar
       }
       if (mode !== "none") process.stdout.write("\n");
       mode = "none";
@@ -335,11 +341,24 @@ export async function replMain(flags: CliFlags) {
           process.stdout.write(dim(d.replace(/\n/g, "\n▌ ")));
           break;
         }
-        case "text":
+        case "text": {
           if (mode === "reason") process.stdout.write("\n\n");
           mode = "text";
-          process.stdout.write(barify(md.push(e.delta)));
+          const rendered = md.push(e.delta);
+          if (config.mode === "plan") {
+            if (planTruncated) { spinner.start("writing plan…"); break; }
+            process.stdout.write(barify(rendered));
+            planLines += (rendered.match(/\n/g) ?? []).length;
+            if (planLines >= PLAN_GIST_LINES) {
+              planTruncated = true;
+              process.stdout.write(dim("▌ … full plan opens in the browser when done\n"));
+              spinner.start("writing plan…");
+            }
+          } else {
+            process.stdout.write(barify(rendered));
+          }
           break;
+        }
         case "tool_start": {
           endSegment();
           active.set(e.id, toolLabel(e.name, e.args));
@@ -408,7 +427,7 @@ export async function replMain(flags: CliFlags) {
       if (finalText.length > 150) {
         try {
           const { exportPlanHtml, openInBrowser } = await import("./planview.ts");
-          const planPath = exportPlanHtml(finalText, provider.model, config.cwd);
+          const planPath = exportPlanHtml(finalText, provider.model, config.cwd, session.id);
           openInBrowser(planPath);
           process.stdout.write(dim(`plan → ${planPath} (opened in browser) · /code to implement it exactly\n`));
         } catch (e) {
