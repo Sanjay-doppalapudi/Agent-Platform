@@ -1,0 +1,51 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What this is
+
+Agent Platform (`ap`) — a minimal coding-agent CLI optimized for raw speed. Bun + TypeScript, **zero runtime dependencies** (Bun built-ins only: fetch, Bun.serve, Bun.spawn, node:readline). Speaks the OpenAI-compatible chat-completions wire format to any provider (OpenCode Go, OpenRouter, NVIDIA NIM, arbitrary base_url). npm package: `@sanjaydoppalapudi/agentplatform`, bin name `ap`.
+
+## Commands
+
+```sh
+bun run dev              # run from source (bun run src/index.ts)
+bun x tsc --noEmit       # typecheck — run after every change; there are no unit tests
+bun run compile          # build ap.exe + prewarm run (Defender scans happen at build time, not first launch)
+bun run dist             # cross-compile all four platform binaries into dist/
+bun run src/index.ts tool grep '{"pattern":"foo"}'   # exercise one tool directly, no LLM call
+bun run src/index.ts run -p "task" --cwd <dir>       # one-shot agent run (needs a provider key)
+```
+
+Releases: `git tag v0.x.y && git push --tags` → `.github/workflows/release.yml` cross-compiles and attaches `dist/*` to the GitHub release, which `install.ps1` / `install.sh` download.
+
+On Windows, `bun build --compile` cannot overwrite a **running** ap.exe (EPERM) — rename it aside first (`Rename-Item ap.exe ap.exe.old-<stamp>`), then build.
+
+## Architecture
+
+One process, one event stream. `agent.ts` runs the loop and emits `AgentEvent`s (`text`/`reasoning`/`tool_start`/`tool_end`/`turn_end`/`done`/`error`); every front-end — REPL (`repl.ts`), one-shot/NDJSON (`run.ts`), HTTP+SSE server (`server.ts`) — is just a different renderer of that same stream. To add a capability, emit an event; never print from inside the loop or tools.
+
+Data flow per turn: `repl/run/server` → `runTurn()` (agent.ts) → `streamChat()` (provider.ts, plain fetch + retry/backoff) → `consumeSSE()` (stream.ts, assembles text + index-keyed tool_call deltas, strips `<think>`/`reasoning_content` into the reasoning channel) → tool dispatch (tools/index.ts registry) → results appended as `role:"tool"` messages → repeat until no tool calls.
+
+- **Modes** (`config.mode`): `code` sends all six tool schemas; `plan` sends only the read-only subset (read/glob/grep) so mutation is structurally impossible, plus a backstop block in agent.ts for hallucinated calls.
+- **Sessions** (`session.ts`): append-only JSONL per session under `<dataDir>/sessions/`, no database. A torn final line is skipped on load — this is the crash-safety mechanism; never buffer writes.
+- **Server** (`server.ts`): endpoint shapes deliberately mirror what 5Pages' `build-server/lib/opencode-runtime.js` calls on opencode (session create → blocking message → SSE events) so it can replace opencode there with a thin adapter.
+- **Credentials** (`creds.ts`): keys live in `<dataDir>/credentials.json`, ACL-locked to the current user. On Windows, icacls grants must use fully-qualified `DOMAIN\user` — a bare username silently grants to nobody when the machine name matches the username.
+- **models.dev** (`models.ts`): provider/model catalog, fetched lazily and disk-cached 24h. Never loaded on the startup path.
+
+## Invariants that make it fast — do not break
+
+- **Byte-stable prompt prefix.** The system prompt (`prompt.ts`) contains no timestamps or dynamic ordering, tool schemas are in a FIXED registry order (`tools/index.ts`), and messages are append-only. This is what makes provider-side automatic prefix caching hit (~85–90% of prompt tokens). Anything that varies per request must go after the history, never into the system prompt or tool list.
+- **Zero npm runtime deps and lazy per-mode `import()`** in `index.ts` — startup is ~45ms compiled; adding a dependency or a top-level import of a mode is a regression.
+- **Every tool output is capped** (read 50KB / bash 30KB middle-out / grep 200 matches / glob 300 files / 40KB backstop in `execTool`). New tools must self-cap.
+- **grep AND glob shell out to ripgrep** so `HARD_IGNORES` dirs (node_modules, builds, trash, dist*, …) are pruned during traversal — the target repo (5Pages) has ~5,000 generated files that make post-filtering unusable.
+- **Reasoning is never re-sent**: `<think>` blocks and `reasoning_content` are surfaced to the UI but excluded from stored history.
+- Terminal rendering is line-buffered markdown (`md.ts`) and a raw-mode line reader (`input.ts`); the readLine `prompt` string must be single-line — it is re-rendered on every keypress.
+
+## Legacy-name compatibility (post-rebrand)
+
+The tool was renamed harness → Agent Platform. Keep accepting the old names: data dir `~/.harness` (new: `~/.ap`), project config `harness.config.json` (new: `ap.config.json`), project notes `HARNESS.md` (new: `AP.md`) — 5Pages still uses `HARNESS.md`. Env vars are still `HARNESS_PROVIDER`/`HARNESS_MODEL`/`HARNESS_BASE_URL`/`HARNESS_API_KEY`.
+
+## Alias tolerance
+
+Weaker models misname tool arguments. `edit` accepts `old`/`old_string`/`oldText` and `new`/`new_string`/`newText` (`tools/edit.ts`), and `ui.ts` renderDiff mirrors the aliases. Extend this pattern rather than letting a turn fail on argument naming.
