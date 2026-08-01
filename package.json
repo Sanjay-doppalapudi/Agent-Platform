@@ -1,6 +1,6 @@
 {
   "name": "@sanjaydoppalapudi/agentplatform",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "description": "Agent Platform (ap) — minimal, fast coding agent CLI (OpenAI-compatible providers)",
   "publishConfig": {
     "access": "public"
@@ -24,6 +24,7 @@
   },
   "scripts": {
     "dev": "bun run src/index.ts",
+    "push": "bun scripts/push.ts",
     "typecheck": "bun x tsc --noEmit",
     "compile": "bun build --compile --minify src/index.ts --outfile ap.exe && ap.exe --version",
     "dist": "bun run dist:win && bun run dist:linux && bun run dist:mac-arm && bun run dist:mac-x64",
