@@ -7,7 +7,7 @@ import { loadConfig, resolveProvider } from "./config.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
 import { Checkpoints } from "./checkpoint.ts";
 import { streamChat } from "./provider.ts";
-import { allIgnores, sandboxRoots } from "./tools/shared.ts";
+import { allIgnores, readRoots, sandboxRoots } from "./tools/shared.ts";
 import { getTool, type PermitFn } from "./tools/index.ts";
 import { listSubagents } from "./tools/agent.ts";
 import { buildSystemPrompt } from "./prompt.ts";
@@ -396,6 +396,7 @@ export async function replMain(flags: CliFlags) {
           }
           console.log(dim(`sandbox: ${config.sandbox} · bashGuard: ${config.bashGuard}`));
           console.log(dim(`writable roots: ${sandboxRoots(config).join(" · ")}`));
+          console.log(dim(`readable roots: ${readRoots(config).join(" · ")} (elsewhere prompts; AP sessions/credentials always blocked)`));
           if (sessionAllows.size) console.log(dim(`session allows: ${[...sessionAllows].join(", ")}`));
           console.log(dim(`/sandbox on|off to toggle`));
           continue;

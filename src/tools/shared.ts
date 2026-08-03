@@ -1,6 +1,6 @@
 // Shared tool utilities: ignores, path handling, binary sniffing, redaction, truncation.
 import { isAbsolute, relative, resolve, basename, join } from "node:path";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import type { Config } from "../config.ts";
 import type { ToolCtx } from "./index.ts";
 
@@ -59,9 +59,54 @@ export function isInsideRoots(target: string, roots: string[]): boolean {
   return false;
 }
 
+/** Directories the agent may READ freely: workspace + skills/memory/commands + session plans. */
+export function readRoots(config: Config): string[] {
+  const roots = [
+    config.cwd,
+    join(config.dataDir, "skills"),
+    join(config.dataDir, "memory"),
+    join(config.dataDir, "commands"),
+    join(homedir(), ".claude", "skills"),
+  ];
+  if (config.sessionId) roots.push(join(tmpdir(), ".ap", config.sessionId));
+  return roots;
+}
+
+/** AP-private data: session transcripts, checkpoints, credentials, config.
+ * NEVER readable by the model — permission cannot override, only sandbox:"off". */
+export function isPrivatePath(target: string, config: Config): boolean {
+  return isInsideRoots(target, [
+    join(config.dataDir, "sessions"),
+    join(config.dataDir, "checkpoints"),
+    join(config.dataDir, "credentials.json"),
+    join(config.dataDir, "config.json"),
+  ]);
+}
+
+/** Gate a read: private → hard deny; outside read roots → permission. */
+export async function ensureReadable(path: string, ctx: ToolCtx): Promise<void> {
+  if (ctx.config.sandbox === "off") return;
+  if (isPrivatePath(path, ctx.config)) {
+    throw new ToolError(
+      `denied: ${path} is AP-private data (session transcripts, checkpoints, credentials) — never readable. Stay within ${ctx.config.cwd}.`,
+    );
+  }
+  if (isInsideRoots(path, readRoots(ctx.config))) return;
+  const ok = await ctx.permit({ action: "read outside workspace", detail: path, path });
+  if (!ok) {
+    throw new ToolError(
+      `denied: ${path} is outside the workspace — do not explore unrelated folders; work within ${ctx.config.cwd}` +
+      ` (the user can approve interactively, or pass --allow-outside in headless mode)`,
+    );
+  }
+}
+
 /** Gate a mutating file action: inside the sandbox → free; outside → permission. */
 export async function ensureAllowed(path: string, ctx: ToolCtx, action: string): Promise<void> {
   if (ctx.config.sandbox === "off") return;
+  if (isPrivatePath(path, ctx.config)) {
+    throw new ToolError(`denied: ${path} is AP-private data (session transcripts, checkpoints, credentials) — never writable.`);
+  }
   if (isInsideRoots(path, sandboxRoots(ctx.config))) return;
   const ok = await ctx.permit({ action, detail: path, path });
   if (!ok) {

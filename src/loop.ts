@@ -24,7 +24,7 @@ import { renderDiff, toolLabel, toolSummary } from "./ui.ts";
 import { Session } from "./session.ts";
 import type { CliFlags } from "./index.ts";
 
-const VERIFY_PROMPT = `[loop verifier] STOP working and audit. Re-read the ORIGINAL GOAL at the top of this session. For each requirement, verify it concretely NOW using ONLY the read/grep/glob tools — do not use bash, do not trust your memory of earlier turns. Then reply with exactly LOOP_DONE if every requirement is met, or a terse numbered list of what is still missing or broken.`;
+const VERIFY_PROMPT = `[loop verifier] STOP working and audit. Re-read the ORIGINAL GOAL at the top of this session. For each requirement, verify it concretely NOW using ONLY the read/grep/glob tools — do not use bash, do not trust your memory of earlier turns. Then reply with exactly LOOP_DONE if every requirement is met, or a terse numbered list of what is still missing or broken, or LOOP_BLOCKED: <reason> if the goal does not apply to this directory at all.`;
 
 const CONTINUE_PROMPT = `[loop] Continue: complete every unmet item from your audit above. Do the work now.`;
 
@@ -124,7 +124,7 @@ export async function loopMain(flags: CliFlags) {
   const historySize = () => session.history.reduce((n, m) => n + JSON.stringify(m).length, 0);
 
   const goal = flags.prompt;
-  let nextMsg = `[loop mode] GOAL:\n${goal}\n\nWork until this goal is FULLY complete. Claims are not enough — an auditor re-verifies everything, and any verification command must pass. You will be re-invoked until it does.`;
+  let nextMsg = `[loop mode] GOAL:\n${goal}\n\nWork until this goal is FULLY complete. Claims are not enough — an auditor re-verifies everything, and any verification command must pass. You will be re-invoked until it does.\nIf the goal does not apply to this directory (e.g. it mentions tests and none exist here), do NOT hunt for meaning in other folders — reply LOOP_BLOCKED: <one-line reason> and stop.`;
   let iter = 0;
   let lastAudit = "";
   let sameAuditStreak = 0;
@@ -140,6 +140,12 @@ export async function loopMain(flags: CliFlags) {
       status(`loop ${iter} — working`);
       const work = await turn(nextMsg);
       if (work.mutated) { anyMutationSinceAudit = true; checkpoint(`loop ${iter}: work`); }
+
+      const blocked = work.text.match(/LOOP_BLOCKED:?\s*(.*)/);
+      if (blocked && !work.mutated) {
+        status(`stopped: goal not applicable — ${blocked[1]?.trim() || "see output above"}`);
+        process.exit(3);
+      }
 
       // Gate 1: objective checks — zero model tokens, hard evidence.
       const failed = runChecks();
@@ -165,6 +171,12 @@ export async function loopMain(flags: CliFlags) {
         else doneVotes = 0;
       }
       if (audit.mutated) { anyMutationSinceAudit = true; checkpoint(`loop ${iter}: verify fixes`); }
+
+      const auditBlocked = audit.text.match(/LOOP_BLOCKED:?\s*(.*)/);
+      if (auditBlocked && !audit.mutated) {
+        status(`stopped: goal not applicable — ${auditBlocked[1]?.trim() || "see output above"}`);
+        process.exit(3);
+      }
 
       if (doneVotes >= 1 && (!audit.mutated || doneVotes >= 3)) {
         // Belt-and-braces: audit passed AND checks pass on the final state.

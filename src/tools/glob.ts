@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
-import { allIgnores, isIgnoredPath, resolvePath } from "./shared.ts";
+import { allIgnores, ensureReadable, isIgnoredPath, resolvePath } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 const MAX_RESULTS = 300;
@@ -17,6 +17,7 @@ export async function globTool(
   ctx: ToolCtx,
 ): Promise<string> {
   const root = args.cwd ? resolvePath(args.cwd, ctx.cwd) : ctx.cwd;
+  if (args.cwd) await ensureReadable(root, ctx);
   const ignores = allIgnores(ctx.config);
 
   let rels: string[];

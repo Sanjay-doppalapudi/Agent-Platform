@@ -1,4 +1,4 @@
-import { isEnvFile, looksBinaryByExt, redactEnvContent, resolvePath, sniffBinary, ToolError } from "./shared.ts";
+import { ensureReadable, isEnvFile, looksBinaryByExt, redactEnvContent, resolvePath, sniffBinary, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 const MAX_LINES = 2000;
@@ -10,6 +10,7 @@ export async function readTool(
   ctx: ToolCtx,
 ): Promise<string> {
   const path = resolvePath(args.path, ctx.cwd);
+  await ensureReadable(path, ctx);
   const file = Bun.file(path);
   if (!(await file.exists())) throw new ToolError(`file not found: ${path}`);
 

@@ -70,7 +70,7 @@ Rules:
 
   if (config.sandbox === "workspace") {
     prompt += `
-- Writes outside the workspace need user permission; dangerous shell commands are blocked automatically — prefer working inside the workspace.`;
+- Stay inside the working directory. Reading or writing outside it requires user permission — never explore unrelated folders, other projects, or AP's own data (sessions, credentials, checkpoints). Dangerous shell commands are blocked automatically.`;
   }
 
   if (!config.light) {

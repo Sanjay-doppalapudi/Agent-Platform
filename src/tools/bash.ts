@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
-import { resolvePath, truncateMiddle, ToolError } from "./shared.ts";
+import { homedir } from "node:os";
+import { isInsideRoots, isPrivatePath, readRoots, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 // Dangerous-command patterns: auto-BLOCKED (never prompted), warned, and
@@ -24,6 +25,30 @@ const DANGEROUS: [RegExp, string][] = [
 export function scanDangerous(cmd: string): string | null {
   for (const [re, why] of DANGEROUS) if (re.test(cmd)) return why;
   return null;
+}
+
+// Absolute-ish path tokens inside a shell command (win drive, git-bash /c/,
+// unix homes, ~, $HOME, %USERPROFILE%). Best-effort — this is the same
+// guardrail-not-VM stance as scanDangerous.
+const PATH_TOKEN_RE = /(?:[A-Za-z]:[\\/]|\/(?:[a-z])\/|\/home\/|\/Users\/|\/etc\/|\/var\/|~[\\/]|\$HOME\b|%USERPROFILE%|\$env:USERPROFILE)[^\s"'`;|&<>()*]*/g;
+
+/** Paths a command references outside the readable roots. {priv} = AP-private. */
+export function scanCmdPaths(
+  cmd: string,
+  ctx: ToolCtx,
+): { outside: string[]; priv: string[] } {
+  const roots = readRoots(ctx.config);
+  const outside = new Set<string>();
+  const priv = new Set<string>();
+  for (const m of cmd.match(PATH_TOKEN_RE) ?? []) {
+    let p = m.replace(/^~(?=[\\/])/, homedir()).replace(/^(\$HOME|%USERPROFILE%|\$env:USERPROFILE)/, homedir());
+    p = resolvePath(p.replace(/[.,:]+$/, ""), ctx.cwd);
+    if (isPrivatePath(p, ctx.config)) priv.add(p);
+    else if (!isInsideRoots(p, roots)) outside.add(p);
+  }
+  // Relative escapes: ../ chains or a bare `cd ..` step out of the workspace.
+  if (/(?:^|[\s"'=(])\.\.[\\/]|\bcd\s+\.\.(?![\w.])/.test(cmd)) outside.add("(relative path escaping the workspace via ..)");
+  return { outside: [...outside].slice(0, 5), priv: [...priv].slice(0, 5) };
 }
 
 const DEFAULT_TIMEOUT_MS = 120_000;
@@ -101,6 +126,27 @@ export async function bashTool(
       } catch {}
       ctx.warn?.(`dangerous command blocked (${danger}) — logged to ${logPath}; share that log with your model provider`);
       throw new ToolError(`dangerous command blocked: ${danger}. Do not retry it or attempt workarounds.`);
+    }
+  }
+  if (ctx.config.sandbox !== "off") {
+    const { outside, priv } = scanCmdPaths(args.cmd + (args.cwd ? ` ${args.cwd}` : ""), ctx);
+    if (priv.length) {
+      throw new ToolError(
+        `denied: command references AP-private data (${priv.join(", ")}) — session transcripts, checkpoints and credentials are never accessible. Stay within ${ctx.cwd}.`,
+      );
+    }
+    if (outside.length) {
+      const ok = await ctx.permit({
+        action: "bash outside workspace",
+        detail: `${args.cmd.slice(0, 120)} → ${outside.join(", ")}`,
+        path: outside[0],
+      });
+      if (!ok) {
+        throw new ToolError(
+          `denied: command references paths outside the workspace (${outside.join(", ")}) — do not explore unrelated folders; work within ${ctx.cwd}` +
+          ` (the user can approve interactively, or pass --allow-outside in headless mode)`,
+        );
+      }
     }
   }
   const cwd = args.cwd ? resolvePath(args.cwd, ctx.cwd) : ctx.cwd;

@@ -1,4 +1,4 @@
-import { allIgnores, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
+import { allIgnores, ensureReadable, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 const MAX_BYTES = 30_000;
@@ -19,6 +19,7 @@ export async function grepTool(
     throw new ToolError("ripgrep (rg) not found on PATH — install from https://github.com/BurntSushi/ripgrep");
   }
   const root = args.path ? resolvePath(args.path, ctx.cwd) : ctx.cwd;
+  if (args.path) await ensureReadable(root, ctx);
   const mode = args.mode ?? "content";
 
   const rgArgs = ["--no-messages", "--hidden"];
