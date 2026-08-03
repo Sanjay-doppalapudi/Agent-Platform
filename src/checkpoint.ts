@@ -86,6 +86,43 @@ export class Checkpoints {
     return this.commit(`restore ${hash}`) ?? hash;
   }
 
+  /** Short hash of the latest checkpoint, or null before the first commit. */
+  head(): string | null {
+    if (!this.ensure()) return null;
+    const r = git(this.gitDir, this.config.cwd, ["rev-parse", "--short", "HEAD"]);
+    return r.ok && r.out ? r.out : null;
+  }
+
+  private static EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+
+  /** Per-file +/- line counts from a checkpoint to the current workspace
+   * (committed + pending merged). from=null → since the first checkpoint. */
+  filesChanged(from: string | null): { file: string; add: string; del: string }[] {
+    if (!this.ensure()) return [];
+    const w = this.config.cwd;
+    const acc = new Map<string, { add: number; del: number; bin: boolean }>();
+    const ingest = (args: string[]) => {
+      const r = git(this.gitDir, w, ["diff", "--numstat", ...args]);
+      if (!r.ok || !r.out) return;
+      for (const line of r.out.split("\n")) {
+        const [a, d, ...rest] = line.split("\t");
+        const file = rest.join("\t");
+        if (!file) continue;
+        const e = acc.get(file) ?? { add: 0, del: 0, bin: false };
+        if (a === "-" || d === "-") e.bin = true;
+        else { e.add += Number(a) || 0; e.del += Number(d) || 0; }
+        acc.set(file, e);
+      }
+    };
+    ingest([from ?? Checkpoints.EMPTY_TREE, "HEAD"]);
+    ingest(["HEAD"]); // pending, uncommitted
+    return [...acc.entries()].map(([file, e]) => ({
+      file,
+      add: e.bin ? "-" : String(e.add),
+      del: e.bin ? "-" : String(e.del),
+    }));
+  }
+
   /** Diff between checkpoints (n back → HEAD) plus uncommitted changes. */
   diff(back = 1, maxBytes = 30_000): string {
     if (!this.ensure()) return "(checkpoints unavailable)";

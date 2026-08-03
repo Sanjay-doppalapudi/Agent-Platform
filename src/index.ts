@@ -87,7 +87,11 @@ const HELP_TOPICS: Record<string, string> = {
 
   Stops when: audit says LOOP_DONE and all checks pass · --max reached
   (exit 2) · the same gaps repeat with zero progress = stalled (exit 2) ·
-  ctrl+c (exit 130). Context auto-compacts, so it can run indefinitely.
+  goal doesn't apply here → LOOP_BLOCKED (exit 3) · ctrl+c (exit 130).
+  Context auto-compacts, so it can run indefinitely.
+
+  After every iteration a collapsed per-file diff is printed (file + added/
+  removed line counts), and a cumulative "total" when the loop ends.
 
   --check "cmd"     objective completion gate; repeatable, all must pass
   --max <n>         iteration cap (default: unlimited)

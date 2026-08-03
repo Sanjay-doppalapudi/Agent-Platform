@@ -112,12 +112,28 @@ export async function loopMain(flags: CliFlags) {
     return null;
   };
 
+  let cp = new Checkpoints(config, session.id);
+  let loopStart: string | null = cp.available() ? cp.head() : null;
   const checkpoint = (label: string) => {
-    const cp = new Checkpoints(config, session.id);
     if (cp.available()) {
       const hash = cp.commit(label);
       if (hash && !json) process.stderr.write(`\x1b[2m✓ checkpoint ${hash}\x1b[0m\n`);
     }
+  };
+
+  // Collapsed per-file diff summary (name + added/removed lines), printed
+  // after every iteration and cumulatively when the loop ends.
+  const showChanges = (from: string | null, scope: string) => {
+    if (!cp.available()) return;
+    const files = cp.filesChanged(from);
+    if (!files.length) return;
+    if (json) {
+      process.stdout.write(JSON.stringify({ type: "loop_diff", scope, files }) + "\n");
+      return;
+    }
+    const w = Math.min(60, Math.max(...files.map((f) => f.file.length)));
+    const lines = files.map((f) => `    ${f.file.padEnd(w)}  \x1b[32m+${f.add}\x1b[0m \x1b[31m-${f.del}\x1b[0m`);
+    process.stderr.write(`\x1b[2m  ▸ changes (${scope})\x1b[0m\n${lines.join("\n")}\n`);
   };
 
   const budget = Math.floor((config.contextBudgetChars ?? 400_000) * 0.6);
@@ -135,8 +151,10 @@ export async function loopMain(flags: CliFlags) {
       iter++;
       if (maxIter > 0 && iter > maxIter) {
         status(`stopped: --max ${maxIter} iterations reached (goal not verified)`);
+        showChanges(loopStart, "total");
         process.exit(2);
       }
+      const iterStart = cp.available() ? cp.head() : null;
       status(`loop ${iter} — working`);
       const work = await turn(nextMsg);
       if (work.mutated) { anyMutationSinceAudit = true; checkpoint(`loop ${iter}: work`); }
@@ -144,12 +162,14 @@ export async function loopMain(flags: CliFlags) {
       const blocked = work.text.match(/LOOP_BLOCKED:?\s*(.*)/);
       if (blocked && !work.mutated) {
         status(`stopped: goal not applicable — ${blocked[1]?.trim() || "see output above"}`);
+        showChanges(loopStart, "total");
         process.exit(3);
       }
 
       // Gate 1: objective checks — zero model tokens, hard evidence.
       const failed = runChecks();
       if (failed) {
+        showChanges(iterStart, `loop ${iter}`);
         status(`loop ${iter} — check failed: ${failed.cmd}`);
         nextMsg = `[loop] Verification command failed:\n$ ${failed.cmd}\n${failed.out}\n\nFix the failure, then continue toward the goal.`;
         continue;
@@ -172,9 +192,12 @@ export async function loopMain(flags: CliFlags) {
       }
       if (audit.mutated) { anyMutationSinceAudit = true; checkpoint(`loop ${iter}: verify fixes`); }
 
+      showChanges(iterStart, `loop ${iter}`);
+
       const auditBlocked = audit.text.match(/LOOP_BLOCKED:?\s*(.*)/);
       if (auditBlocked && !audit.mutated) {
         status(`stopped: goal not applicable — ${auditBlocked[1]?.trim() || "see output above"}`);
+        showChanges(loopStart, "total");
         process.exit(3);
       }
 
@@ -183,6 +206,7 @@ export async function loopMain(flags: CliFlags) {
         const recheck = runChecks();
         if (!recheck) {
           status(`done after ${iter} iteration${iter === 1 ? "" : "s"} — goal verified`);
+          showChanges(loopStart, "total");
           process.exit(0);
         }
         nextMsg = `[loop] Final check failed after your LOOP_DONE:\n$ ${recheck.cmd}\n${recheck.out}\n\nFix it.`;
@@ -197,6 +221,7 @@ export async function loopMain(flags: CliFlags) {
       anyMutationSinceAudit = false;
       if (sameAuditStreak >= 2) {
         status(`stopped: stalled — the same unmet items repeated ${sameAuditStreak + 1}× with no progress. Remaining:\n${audit.text.trim()}`);
+        showChanges(loopStart, "total");
         process.exit(2);
       }
 
@@ -212,7 +237,11 @@ export async function loopMain(flags: CliFlags) {
       }
     }
   } catch (e) {
-    if (ctrl.signal.aborted) { status(`aborted at iteration ${iter}`); process.exit(130); }
+    if (ctrl.signal.aborted) {
+      status(`aborted at iteration ${iter}`);
+      showChanges(loopStart, "total");
+      process.exit(130);
+    }
     if (json) process.stdout.write(JSON.stringify({ type: "error", message: (e as Error).message }) + "\n");
     else console.error(`\nloop failed: ${(e as Error).message}`);
     process.exit(1);
