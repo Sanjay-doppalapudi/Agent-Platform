@@ -2,7 +2,7 @@
 // Entry point: parse argv, dispatch to a mode via lazy import so the hot path
 // (startup → first prompt) loads only what it needs.
 
-const VERSION = "0.1.4";
+const VERSION = "0.1.5";
 
 export interface CliFlags {
   provider?: string;

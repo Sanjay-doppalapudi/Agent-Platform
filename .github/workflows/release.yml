@@ -10,6 +10,10 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # secrets context is not allowed in step-level `if:` — expose presence
+      # as a job env var and gate the npm steps on that instead.
+      HAS_NPM_TOKEN: ${{ secrets.NPM_TOKEN != '' }}
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -24,11 +28,11 @@ jobs:
       # (granular access token with 2FA bypass). Without the secret this
       # step is skipped and the release still succeeds.
       - uses: actions/setup-node@v4
-        if: ${{ secrets.NPM_TOKEN != '' }}
+        if: env.HAS_NPM_TOKEN == 'true'
         with:
           node-version: 22
           registry-url: "https://registry.npmjs.org"
       - run: npm publish
-        if: ${{ secrets.NPM_TOKEN != '' }}
+        if: env.HAS_NPM_TOKEN == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
