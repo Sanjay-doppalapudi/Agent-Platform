@@ -2,7 +2,7 @@
 // Entry point: parse argv, dispatch to a mode via lazy import so the hot path
 // (startup → first prompt) loads only what it needs.
 
-const VERSION = "0.1.7";
+const VERSION = "0.1.8";
 
 export interface CliFlags {
   provider?: string;
@@ -20,6 +20,7 @@ export interface CliFlags {
   system?: string;
   noSandbox?: boolean;
   allowOutside?: boolean;
+  light?: boolean;
 }
 
 function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string[] } {
@@ -45,6 +46,7 @@ function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string
       case "--system": flags.system = argv[++i]; break;
       case "--no-sandbox": flags.noSandbox = true; break;
       case "--allow-outside": flags.allowOutside = true; break;
+      case "--light": flags.light = true; break;
       case "--version": case "-v": console.log(VERSION); process.exit(0);
       case "--help": case "-h": printHelp(); process.exit(0);
       default:
@@ -80,6 +82,7 @@ Flags:
   --json              NDJSON event output (run mode)
   --no-sandbox        disable the workspace write-sandbox for this invocation
   --allow-outside     headless: allow writes outside the workspace (run mode)
+  --light             minimal profile: smallest prompt, no memory/plan extras
   -v, --version       print version`);
 }
 

@@ -197,11 +197,11 @@ export async function replMain(flags: CliFlags) {
     " / ___ |/ ____/ ",
     "/_/  |_/_/      ",
   ];
-  if ((process.stdout.columns ?? 80) >= 20 && process.stdout.isTTY) {
+  if (!config.light && (process.stdout.columns ?? 80) >= 20 && process.stdout.isTTY) {
     for (const l of LOGO) console.log(cyan(l));
     console.log(dim(`  ${provider.name}/${provider.model}`));
   } else {
-    console.log(`${cyan("◆")} ${bold("AP")} ${dim("·")} ${provider.name}/${provider.model}`);
+    console.log(`${cyan("◆")} ${bold("AP")} ${dim("·")} ${provider.name}/${provider.model}${config.light ? dim(" · light") : ""}`);
   }
   console.log(dim(`  cwd ${config.cwd}`));
   console.log(dim(`  session ${session.id} · type / for commands · ctrl+o details · ctrl+c abort`));
@@ -548,9 +548,9 @@ export async function replMain(flags: CliFlags) {
     if (config.mode === "plan" && finalText.trim()) {
       lastPlan = finalText;
       // Export only when the plan outgrew the terminal, or the user asked
-      // for a page — short plans just print inline.
+      // for a page — short plans just print inline. Light profile: never.
       const wantsHtml = /\b(html|browser|page)\b/i.test(input);
-      if (fullR.planTruncated || wantsHtml) {
+      if (!config.light && (fullR.planTruncated || wantsHtml)) {
         try {
           const { exportPlanHtml, openInBrowser } = await import("./planview.ts");
           const planPath = exportPlanHtml(finalText, provider.model, config.cwd, session.id);

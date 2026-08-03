@@ -23,6 +23,9 @@ export interface Config {
   permissions: "yolo" | "prompt";
   sandbox: "workspace" | "off";
   bashGuard: "on" | "off";
+  /** Light profile: smallest possible prompt + no optional features. Every
+   *  non-essential feature (current and future) must check this flag. */
+  light: boolean;
   streamIdleSeconds: number;
   maxIterations: number;
   contextBudgetChars: number;
@@ -58,6 +61,7 @@ const DEFAULTS: Omit<Config, "provider" | "providers" | "cwd"> = {
   permissions: "yolo",
   sandbox: "workspace",
   bashGuard: "on",
+  light: false,
   streamIdleSeconds: 90,
   maxIterations: 40,
   contextBudgetChars: 400_000,
@@ -107,6 +111,7 @@ export function loadConfig(flags: CliFlags): Config {
   if (flags.provider) merged.provider = flags.provider;
   if (flags.mode === "plan" || flags.mode === "code") merged.mode = flags.mode;
   if (flags.noSandbox) merged.sandbox = "off";
+  if (flags.light) merged.light = true;
   return merged;
 }
 

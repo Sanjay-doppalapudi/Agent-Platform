@@ -65,16 +65,18 @@ Rules:
 PLAN MODE: You have read-only tools. Explore the codebase, then produce a concrete implementation plan: files to change, what changes, in what order, and how to verify. Do not attempt modifications.`;
   }
 
-  const memDir = join(config.dataDir, "memory");
-  prompt += `
+  if (!config.light) {
+    const memDir = join(config.dataDir, "memory");
+    prompt += `
 
 Memory: when the user corrects you or wants something different from what you did, save it — write ${memDir}\\<short-slug>.md with exactly three lines: "Title: …", "User wanted: …", "Why (guess): …". Consult the saved memories below before repeating a choice the user disliked.`;
-  const memories = memoriesForSession(memDir, config.sessionId ?? "");
-  if (memories) prompt += `\n\nSaved user preferences:\n${memories}`;
+    const memories = memoriesForSession(memDir, config.sessionId ?? "");
+    if (memories) prompt += `\n\nSaved user preferences:\n${memories}`;
 
-  if (config.sessionId) {
-    const plansDir = join(tmpdir(), ".ap", config.sessionId);
-    prompt += `\n\nPlans from this session are saved as HTML in ${plansDir} — read earlier ones from there when useful. Folders of other sessions are strictly off-limits.`;
+    if (config.sessionId) {
+      const plansDir = join(tmpdir(), ".ap", config.sessionId);
+      prompt += `\n\nPlans from this session are saved as HTML in ${plansDir} — read earlier ones from there when useful. Folders of other sessions are strictly off-limits.`;
+    }
   }
 
   for (const name of ["AP.md", "HARNESS.md"]) {
