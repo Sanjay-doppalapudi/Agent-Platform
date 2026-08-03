@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="110" viewBox="0 0 220 110" role="img" aria-label="Agent Platform logo">
+  <style>
+    .ink { fill: #0f172a; }
+    @media (prefers-color-scheme: dark) { .ink { fill: #e2e8f0; } }
+  </style>
+  <rect x="20" y="20" width="13" height="70" rx="5" fill="#06b6d4"/>
+  <text x="50" y="81" font-family="'Segoe UI', system-ui, -apple-system, 'Helvetica Neue', sans-serif" font-size="62" font-weight="600" class="ink">AP</text>
+</svg>

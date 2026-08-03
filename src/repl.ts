@@ -181,7 +181,21 @@ export async function replMain(flags: CliFlags) {
   }
 
   config.sessionId = session.id;
-  console.log(`${cyan("◆")} ${bold("AP")} ${dim("·")} ${provider.name}/${provider.model}`);
+  // Slant logo (16 cols wide) — printed only when the terminal fits it, so
+  // the banner is layout-safe at any terminal size.
+  const LOGO = [
+    "    ___    ____ ",
+    "   /   |  / __ \\",
+    "  / /| | / /_/ /",
+    " / ___ |/ ____/ ",
+    "/_/  |_/_/      ",
+  ];
+  if ((process.stdout.columns ?? 80) >= 20 && process.stdout.isTTY) {
+    for (const l of LOGO) console.log(cyan(l));
+    console.log(dim(`  ${provider.name}/${provider.model}`));
+  } else {
+    console.log(`${cyan("◆")} ${bold("AP")} ${dim("·")} ${provider.name}/${provider.model}`);
+  }
   console.log(dim(`  cwd ${config.cwd}`));
   console.log(dim(`  session ${session.id} · type / for commands · ctrl+o details · ctrl+c abort`));
 

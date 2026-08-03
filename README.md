@@ -1,3 +1,5 @@
+<p align="center"><img src="logo.svg" width="200" alt="Agent Platform"></p>
+
 # Agent Platform (`ap`)
 
 Minimal, fast coding agent CLI. OpenAI-compatible providers only (OpenCode Go, OpenRouter, NVIDIA NIM, any base_url). Six tools: `read` · `write` · `edit` · `bash` · `glob` · `grep`. Zero runtime dependencies — Bun built-ins only. ~45ms cold start.
