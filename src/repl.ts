@@ -7,7 +7,7 @@ import { loadConfig, resolveProvider } from "./config.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
 import { Checkpoints } from "./checkpoint.ts";
 import { streamChat } from "./provider.ts";
-import { sandboxRoots } from "./tools/shared.ts";
+import { allIgnores, sandboxRoots } from "./tools/shared.ts";
 import { getTool, type PermitFn } from "./tools/index.ts";
 import { listSubagents } from "./tools/agent.ts";
 import { buildSystemPrompt } from "./prompt.ts";
@@ -336,6 +336,17 @@ export async function replMain(flags: CliFlags) {
       prompt: promptLabel,
       commands: menuCommands,
       history,
+      files: config.light ? undefined : () => {
+        // Workspace file list for @-completion — pruned by ripgrep, capped.
+        const rgArgs = ["--files", "--hidden"];
+        for (const ig of allIgnores(config)) rgArgs.push("-g", `!**/${ig}/**`, "-g", `!${ig}/**`);
+        const p = Bun.spawnSync(["rg", ...rgArgs], { cwd: config.cwd, stdout: "pipe", stderr: "ignore" });
+        return (p.stdout?.toString() ?? "")
+          .split("\n")
+          .filter(Boolean)
+          .slice(0, 800)
+          .map((f) => f.replace(/\\/g, "/"));
+      },
       onCtrlO: () => toggleVerbose(true),
     }))?.trim();
 
