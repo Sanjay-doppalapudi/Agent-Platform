@@ -21,6 +21,9 @@ export interface Config {
   providers: Record<string, ProviderEntry>;
   mode: "plan" | "code";
   permissions: "yolo" | "prompt";
+  sandbox: "workspace" | "off";
+  bashGuard: "on" | "off";
+  streamIdleSeconds: number;
   maxIterations: number;
   contextBudgetChars: number;
   redactEnv: boolean;
@@ -53,6 +56,9 @@ function defaultDataDir(): string {
 const DEFAULTS: Omit<Config, "provider" | "providers" | "cwd"> = {
   mode: "code",
   permissions: "yolo",
+  sandbox: "workspace",
+  bashGuard: "on",
+  streamIdleSeconds: 90,
   maxIterations: 40,
   contextBudgetChars: 400_000,
   redactEnv: true,
@@ -100,6 +106,7 @@ export function loadConfig(flags: CliFlags): Config {
   merged.ignore ??= [];
   if (flags.provider) merged.provider = flags.provider;
   if (flags.mode === "plan" || flags.mode === "code") merged.mode = flags.mode;
+  if (flags.noSandbox) merged.sandbox = "off";
   return merged;
 }
 

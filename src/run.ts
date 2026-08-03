@@ -13,6 +13,10 @@ export async function runMain(flags: CliFlags) {
     process.exit(1);
   }
   const config = loadConfig(flags);
+  if (config.permissions === "prompt") {
+    config.permissions = "yolo";
+    process.stderr.write(`permissions:"prompt" is interactive-only — running as yolo (sandbox still applies)\n`);
+  }
   const provider = resolveProvider(config, flags);
   const session = flags.session
     ? Session.load(config.dataDir, flags.session)
@@ -31,6 +35,9 @@ export async function runMain(flags: CliFlags) {
     switch (e.type) {
       case "reasoning":
         process.stderr.write(`\x1b[2m${e.delta}\x1b[0m`); // dim, stderr — keeps stdout pipeable
+        break;
+      case "warn":
+        process.stderr.write(`\x1b[33m⚠ ${e.message}\x1b[0m\n`);
         break;
       case "text":
         process.stdout.write(md ? md.push(e.delta) : e.delta);
@@ -66,6 +73,7 @@ export async function runMain(flags: CliFlags) {
   try {
     await runTurn(config, provider, session, flags.prompt, emit, ctrl.signal, {
       systemOverride: flags.system,
+      permit: flags.allowOutside ? async () => true : undefined, // undefined → auto-deny
     });
     if (md) process.stdout.write(md.flush());
     if (!json) process.stdout.write("\n");

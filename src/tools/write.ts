@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
-import { resolvePath } from "./shared.ts";
+import { ensureAllowed, resolvePath, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 export async function writeTool(
@@ -8,6 +8,10 @@ export async function writeTool(
   ctx: ToolCtx,
 ): Promise<string> {
   const path = resolvePath(args.path, ctx.cwd);
+  if (typeof args.content !== "string") {
+    throw new ToolError("write requires {path, content}");
+  }
+  await ensureAllowed(path, ctx, "write file");
   mkdirSync(dirname(path), { recursive: true });
   const n = await Bun.write(path, args.content);
   return `wrote ${n} bytes to ${path}`;

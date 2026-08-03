@@ -5,12 +5,13 @@ import type { Config, ResolvedProvider } from "./config.ts";
 import { ProviderError, streamChat, type Msg } from "./provider.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import type { Session } from "./session.ts";
-import { execTool, getTool, toolSchemasFor } from "./tools/index.ts";
+import { autoDenyPermit, execTool, getTool, resolveToolName, toolSchemasFor, type PermitFn } from "./tools/index.ts";
 import type { Usage } from "./stream.ts";
 
 export type AgentEvent =
   | { type: "text"; delta: string }
   | { type: "reasoning"; delta: string }
+  | { type: "warn"; message: string }
   | { type: "tool_start"; id: string; name: string; args: unknown }
   | { type: "tool_end"; id: string; name: string; output: string; ms: number; error?: boolean }
   | { type: "turn_end"; usage?: Usage }
@@ -24,6 +25,7 @@ const KEEP_RECENT_TOOL_MSGS = 12;
 export interface RunOptions {
   extra?: Record<string, unknown>; // passthrough body fields (e.g. response_format)
   systemOverride?: string;
+  permit?: PermitFn; // sandbox permission callback (default: deny)
 }
 
 /** Run one user turn to completion. Returns the final assistant text. */
@@ -40,6 +42,7 @@ export async function runTurn(
   session.append({ role: "user", content: userText });
 
   let finalText = "";
+  let midStreamRetried = false; // one mid-stream retry per turn
   for (let iter = 0; iter < config.maxIterations; iter++) {
     if (signal.aborted) break;
     const msgs: Msg[] = [{ role: "system", content: system }, ...session.history];
@@ -55,9 +58,19 @@ export async function runTurn(
         signal,
         opts.extra,
         (delta) => emit({ type: "reasoning", delta }),
+        config.streamIdleSeconds * 1000,
       );
     } catch (e) {
       const pe = e as ProviderError;
+      // Mid-stream failures are safe to retry whole: tools only run after
+      // full assembly and history is appended only on success.
+      if (pe.retryable && pe.midStream && !midStreamRetried && !signal.aborted) {
+        midStreamRetried = true;
+        emit({ type: "error", message: `${pe.message} — retrying the request`, retryable: true });
+        await new Promise((r) => setTimeout(r, 1000));
+        iter--;
+        continue;
+      }
       emit({ type: "error", message: pe.message, retryable: pe.retryable ?? false });
       throw e;
     }
@@ -76,25 +89,43 @@ export async function runTurn(
     }
 
     // Dispatch: read-only calls concurrently, mutating calls serially after,
-    // results appended in the model's original order.
-    const ctx = { cwd: config.cwd, signal, config };
+    // results appended in the model's original order. Names are alias-resolved
+    // BEFORE classification/blocking so e.g. "search" counts as read-only.
+    const ctx = {
+      cwd: config.cwd,
+      signal,
+      config,
+      permit: opts.permit ?? autoDenyPermit,
+      warn: (message: string) => emit({ type: "warn", message }),
+    };
     const results = new Array<{ output: string; error: boolean; ms: number }>(res.toolCalls.length);
     const policy = config.parallelPolicy;
 
     const runOne = async (i: number) => {
       const tc = res.toolCalls[i]!;
+      const canonical = resolveToolName(tc.function.name);
       let args: unknown = {};
       try { args = JSON.parse(tc.function.arguments || "{}"); } catch {}
-      emit({ type: "tool_start", id: tc.id, name: tc.function.name, args });
+      emit({ type: "tool_start", id: tc.id, name: canonical, args });
       const start = performance.now();
-      // Plan mode is structurally read-only; block hallucinated mutations too.
-      const r =
-        config.mode === "plan" && !getTool(tc.function.name)?.readOnly
-          ? { output: "blocked: plan mode is read-only (switch to code mode to apply changes)", error: true }
-          : await execTool(tc.function.name, tc.function.arguments, ctx);
+      let r: { output: string; error: boolean };
+      if (config.mode === "plan" && !getTool(canonical)?.readOnly) {
+        // Plan mode is structurally read-only; block hallucinated mutations too.
+        r = { output: "blocked: plan mode is read-only (switch to code mode to apply changes)", error: true };
+      } else if (config.permissions === "prompt" && getTool(canonical) && !getTool(canonical)!.readOnly) {
+        const ok = await ctx.permit({
+          action: `run ${canonical}`,
+          detail: `${canonical} ${tc.function.arguments.slice(0, 120)}`,
+        });
+        r = ok
+          ? await execTool(tc.function.name, tc.function.arguments, ctx)
+          : { output: "denied by user", error: true };
+      } else {
+        r = await execTool(tc.function.name, tc.function.arguments, ctx);
+      }
       const ms = Math.round(performance.now() - start);
       results[i] = { ...r, ms };
-      emit({ type: "tool_end", id: tc.id, name: tc.function.name, output: r.output, ms, error: r.error });
+      emit({ type: "tool_end", id: tc.id, name: canonical, output: r.output, ms, error: r.error });
     };
 
     if (policy === "none") {
@@ -105,7 +136,7 @@ export async function runTurn(
       const readIdx: number[] = [];
       const mutIdx: number[] = [];
       res.toolCalls.forEach((tc, i) => {
-        (getTool(tc.function.name)?.readOnly ? readIdx : mutIdx).push(i);
+        (getTool(resolveToolName(tc.function.name))?.readOnly ? readIdx : mutIdx).push(i);
       });
       await Promise.all(readIdx.map(runOne));
       for (const i of mutIdx) await runOne(i);

@@ -15,6 +15,8 @@ export async function toolMain(flags: CliFlags, rest: string[]) {
     cwd: config.cwd,
     signal: new AbortController().signal,
     config,
+    permit: async () => true, // developer typed the exact args — trusted
+    warn: (m) => console.error(`⚠ ${m}`),
   });
   const ms = Math.round(performance.now() - start);
   console.log(output);

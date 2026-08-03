@@ -54,6 +54,11 @@ Rules:
 - For dev servers or long-running processes use bash with background:true.
 - When done, reply with a one-or-two-sentence result. Nothing else.`;
 
+  if (config.sandbox === "workspace") {
+    prompt += `
+- Writes outside the workspace need user permission; dangerous shell commands are blocked automatically — prefer working inside the workspace.`;
+  }
+
   if (config.mode === "plan") {
     prompt += `
 

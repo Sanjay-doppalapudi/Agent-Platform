@@ -1,8 +1,11 @@
 // Interactive REPL: slash-command menu, streaming markdown render, ctrl+o
 // detail toggle (true collapse/expand via in-place re-render), ctrl+c aborts.
 import { emitKeypressEvents } from "node:readline";
+import { dirname, resolve } from "node:path";
 import { loadConfig, resolveProvider } from "./config.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
+import { sandboxRoots } from "./tools/shared.ts";
+import type { PermitFn } from "./tools/index.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import { readLine, type SlashCommand } from "./input.ts";
 import { MdRenderer } from "./md.ts";
@@ -16,6 +19,7 @@ const cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
 const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
 const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
+const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
 
 // Accent bar marking agent-output lines.
 const BAR = "\x1b[2;36m▌\x1b[0m ";
@@ -50,6 +54,7 @@ const COMMANDS: SlashCommand[] = [
   { name: "/new", desc: "start a fresh session" },
   { name: "/resume", desc: "resume a session by id", hasArg: true },
   { name: "/sessions", desc: "list recent sessions" },
+  { name: "/sandbox", desc: "show or toggle the write-sandbox", hasArg: true },
   { name: "/system", desc: "show the system prompt" },
   { name: "/context", desc: "show context/token usage" },
   { name: "/exit", desc: "quit" },
@@ -145,6 +150,8 @@ class TurnRenderer {
       }
       case "turn_end":
         return this.endSegment();
+      case "warn":
+        return `${this.endSegment()}${BAR}${yellow(`⚠ ${e.message}`)}\n`;
       case "error":
         return `\n${dim("error:")} ${e.message}\n`;
       default:
@@ -205,6 +212,11 @@ export async function replMain(flags: CliFlags) {
   let planArmed = false;
   const spinner = makeSpinner();
   const history: string[] = [];
+
+  // Sandbox permission state: session-scoped "always allow" keys and a
+  // promise chain so parallel tools never show two prompts at once.
+  let sessionAllows = new Set<string>();
+  let permitChain: Promise<unknown> = Promise.resolve();
 
   // Turn buffers: what a full render looks like, what a compact render looks
   // like, and what is actually on screen right now. ctrl+o erases the on-
@@ -289,15 +301,31 @@ export async function replMain(flags: CliFlags) {
         case "new":
           session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
           config.sessionId = session.id;
+          sessionAllows = new Set();
           console.log(dim(`new session ${session.id}`));
           continue;
         case "resume":
           try {
             session = Session.load(config.dataDir, rest[0] ?? "");
             config.sessionId = session.id;
+            sessionAllows = new Set();
             console.log(dim(`resumed ${session.id} (${session.history.length} msgs)`));
           } catch (e) { console.log(dim((e as Error).message)); }
           continue;
+        case "sandbox": {
+          const arg = rest[0];
+          if (arg === "on") config.sandbox = "workspace";
+          else if (arg === "off") config.sandbox = "off";
+          if (arg === "on" || arg === "off") {
+            console.log(dim(`sandbox → ${config.sandbox} (system prompt changed — one-time cache re-prime)`));
+            continue;
+          }
+          console.log(dim(`sandbox: ${config.sandbox} · bashGuard: ${config.bashGuard}`));
+          console.log(dim(`writable roots: ${sandboxRoots(config).join(" · ")}`));
+          if (sessionAllows.size) console.log(dim(`session allows: ${[...sessionAllows].join(", ")}`));
+          console.log(dim(`/sandbox on|off to toggle`));
+          continue;
+        }
         case "session": case "sessions": {
           for (const s of Session.list(config.dataDir)) {
             const mark = s.id === session.id ? cyan("▸") : " ";
@@ -433,6 +461,42 @@ export async function replMain(flags: CliFlags) {
       printedBuf += s;
     };
 
+    // One keypress: y (allow once) / a (always this session) / n·Enter·Esc (deny).
+    const readPermitKey = (): Promise<"y" | "n" | "a"> =>
+      new Promise((res) => {
+        const done = (v: "y" | "n" | "a") => {
+          process.stdin.removeListener("keypress", onKey);
+          res(v);
+        };
+        const onKey = (_s: string, key: any) => {
+          if (!key) return;
+          if (key.ctrl && key.name === "c") { done("n"); return; } // global handler aborts the turn
+          if (key.ctrl) return;
+          if (key.name === "y") done("y");
+          else if (key.name === "a") done("a");
+          else if (key.name === "n" || key.name === "return" || key.name === "enter" || key.name === "escape") done("n");
+        };
+        process.stdin.on("keypress", onKey);
+      });
+
+    const permit: PermitFn = (req) => {
+      const key = req.path
+        ? dirname(resolve(req.path)).toLowerCase()
+        : (req.detail.split(/\s+/)[0] ?? req.detail).toLowerCase();
+      const result = permitChain.then(async () => {
+        if (ctrl?.signal.aborted) return false;
+        if (sessionAllows.has(key)) return true;
+        spinner.stop();
+        writeBoth(`${BAR}${yellow("?")} ${req.action}: ${req.detail} ${dim("— allow? [y/N/a=always]")} `);
+        const ans = await readPermitKey();
+        writeBoth(dim(ans === "a" ? "always\n" : ans === "y" ? "yes\n" : "no\n"));
+        if (ans === "a") { sessionAllows.add(key); return true; }
+        return ans === "y";
+      });
+      permitChain = result.catch(() => {});
+      return result;
+    };
+
     const emit = (e: AgentEvent) => {
       spinner.stop();
       let label: string | undefined;
@@ -470,7 +534,7 @@ export async function replMain(flags: CliFlags) {
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     let finalText = "";
     try {
-      finalText = await runTurn(config, provider, session, userText, emit, ctrl.signal);
+      finalText = await runTurn(config, provider, session, userText, emit, ctrl.signal, { permit });
     } catch {
       // error already emitted
     } finally {

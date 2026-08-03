@@ -20,6 +20,9 @@
     }
   },
   "permissions": "yolo",
+  "sandbox": "workspace",
+  "bashGuard": "on",
+  "streamIdleSeconds": 90,
   "maxIterations": 40,
   "contextBudgetChars": 400000,
   "redactEnv": true,

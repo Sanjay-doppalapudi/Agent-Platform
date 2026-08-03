@@ -1,8 +1,30 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, openSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, openSync } from "node:fs";
 import { join } from "node:path";
 import { resolvePath, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
+
+// Dangerous-command patterns: auto-BLOCKED (never prompted), warned, and
+// logged to <dataDir>/blocked-commands.jsonl so the user can report the model.
+// Best-effort by design — obfuscated commands can evade a pattern scan.
+const DANGEROUS: [RegExp, string][] = [
+  [/\brm\s+(-[a-z]*r[a-z]*f|-[a-z]*f[a-z]*r)\S*\s+("|')?(\/|[A-Za-z]:[\\/]|~\/?(\s|$)|\$HOME)/i, "recursive force delete of an absolute path"],
+  [/\b(del|rmdir|rd)\b[^&|;]*\/s/i, "recursive Windows delete"],
+  [/\bformat\s+[a-z]:/i, "disk format"],
+  [/\breg(\.exe)?\s+(add|delete)\b/i, "registry modification"],
+  [/remove-item\b[^&|;]*-recurse[^&|;]*([A-Za-z]:[\\/]|\\\\)/i, "recursive Remove-Item on an absolute path"],
+  [/\bmkfs\b/, "filesystem format"],
+  [/\bdd\s+[^&|;]*of=\/dev\//, "raw disk write"],
+  [/\bshutdown\b/i, "system shutdown/restart"],
+  [/\btaskkill\b[^&|;]*\/f[^&|;]*\/im/i, "force-kill processes by name"],
+  [/:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;/, "fork bomb"],
+  [/\b(curl|wget|irm|iwr)\b[^&|;]*\|\s*(bash|sh|iex|powershell)/i, "piping a download straight into a shell"],
+];
+
+export function scanDangerous(cmd: string): string | null {
+  for (const [re, why] of DANGEROUS) if (re.test(cmd)) return why;
+  return null;
+}
 
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
@@ -60,6 +82,27 @@ export async function bashTool(
   args: { cmd: string; cwd?: string; timeout?: number; background?: boolean },
   ctx: ToolCtx,
 ): Promise<string> {
+  if (typeof args.cmd !== "string" || !args.cmd.trim()) {
+    throw new ToolError("bash requires {cmd}");
+  }
+  if (ctx.config.bashGuard !== "off") {
+    const danger = scanDangerous(args.cmd);
+    if (danger) {
+      const logPath = join(ctx.config.dataDir, "blocked-commands.jsonl");
+      try {
+        mkdirSync(ctx.config.dataDir, { recursive: true });
+        appendFileSync(logPath, JSON.stringify({
+          at: new Date().toISOString(),
+          sessionId: ctx.config.sessionId ?? null,
+          cwd: ctx.cwd,
+          cmd: args.cmd,
+          reason: danger,
+        }) + "\n");
+      } catch {}
+      ctx.warn?.(`dangerous command blocked (${danger}) — logged to ${logPath}; share that log with your model provider`);
+      throw new ToolError(`dangerous command blocked: ${danger}. Do not retry it or attempt workarounds.`);
+    }
+  }
   const cwd = args.cwd ? resolvePath(args.cwd, ctx.cwd) : ctx.cwd;
   const prefix = shellPrefix(ctx.config.shell);
 

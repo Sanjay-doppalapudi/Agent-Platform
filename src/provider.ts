@@ -1,6 +1,6 @@
 // Fetch-based OpenAI-compatible streaming client. No SDK.
 import type { ResolvedProvider } from "./config.ts";
-import { consumeSSE, type AssembledResponse, type ToolCall } from "./stream.ts";
+import { consumeSSE, StreamStallError, type AssembledResponse, type ToolCall } from "./stream.ts";
 
 export type ContentPart = {
   type: "text";
@@ -23,6 +23,7 @@ export class ProviderError extends Error {
     message: string,
     public status: number,
     public retryable: boolean,
+    public midStream = false, // failed after deltas started (safe to retry the whole request — tools only run after full assembly)
   ) {
     super(message);
   }
@@ -45,6 +46,7 @@ export async function streamChat(
   signal?: AbortSignal,
   extra?: Record<string, unknown>,
   onReasoning?: (delta: string) => void,
+  idleTimeoutMs = 0,
 ): Promise<AssembledResponse> {
   const url = `${provider.baseUrl}/chat/completions`;
   const headers: Record<string, string> = {
@@ -108,9 +110,15 @@ export async function streamChat(
       lastErr = new ProviderError("empty response body", 0, true);
       continue;
     }
-    // Once we start consuming the stream we no longer retry — tools only run
-    // after full assembly, so a mid-stream failure fails the turn cleanly.
-    return await consumeSSE(res.body, onText, signal, onReasoning);
+    // Once we start consuming the stream we no longer retry HERE — the agent
+    // loop owns mid-stream retries (tagged via midStream).
+    try {
+      return await consumeSSE(res.body, onText, signal, onReasoning, idleTimeoutMs);
+    } catch (e) {
+      if (signal?.aborted) throw new ProviderError("aborted", 0, false);
+      if (e instanceof StreamStallError) throw new ProviderError(e.message, 0, true, true);
+      throw new ProviderError(`stream failed: ${(e as Error).message}`, 0, true, true);
+    }
   }
   throw lastErr ?? new ProviderError("request failed", 0, true);
 }

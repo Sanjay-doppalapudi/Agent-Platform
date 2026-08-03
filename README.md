@@ -117,7 +117,10 @@ Project `ap.config.json` (walked up from cwd; legacy `harness.config.json` accep
 | Key | Default | Notes |
 |---|---|---|
 | `mode` | `"code"` | `"plan"` = read-only tools |
-| `permissions` | `"yolo"` | `"prompt"` asks y/N for write/edit/bash in the REPL |
+| `permissions` | `"yolo"` | `"prompt"` asks before every mutating tool in the REPL |
+| `sandbox` | `"workspace"` | writes/edits outside the workspace (+ data dir + session plans) need a y/N/always permission; `"off"` or `--no-sandbox` disables; headless denies unless `--allow-outside` |
+| `bashGuard` | `"on"` | dangerous shell patterns (recursive absolute deletes, format, registry edits, curl\|bash, …) are auto-blocked, warned, and logged to `<dataDir>/blocked-commands.jsonl` for provider feedback |
+| `streamIdleSeconds` | 90 | stalled provider streams abort and retry once instead of hanging (0 = off) |
 | `maxIterations` | 40 | agent loop guard |
 | `contextBudgetChars` | 400000 | old tool results elided beyond this |
 | `redactEnv` | true | `.env` values read back as `KEY=***` |
@@ -128,6 +131,12 @@ Project `ap.config.json` (walked up from cwd; legacy `harness.config.json` accep
 **API keys** live apart from config in `<dataDir>/credentials.json`, file-ACL'd to your user (`ap auth <provider>`). Resolution: `--api-key` → `HARNESS_API_KEY` → config `apiKey` → provider env var → credential store.
 
 **Per-project prompt notes:** drop an `AP.md` (or legacy `HARNESS.md`) in a project root — its content is appended to the system prompt for that project (build rules, submodule conventions, dev-server ports…).
+
+## Sandbox
+
+Reads are unrestricted; **mutations are jailed**: `write`/`edit` outside the workspace, the AP data dir, or the session plans folder trigger an interactive `[y/N/a=always]` permission in the REPL and are denied headlessly unless `--allow-outside`. Dangerous bash patterns are **auto-blocked** (never prompted) with a ⚠ warning and a JSONL log entry you can share with your model provider. This is a guardrail, not a VM: pattern scanning is best-effort, symlinks aren't resolved, and network egress isn't restricted. `/sandbox` shows state; `/sandbox off` disables per-session.
+
+Weaker-model tolerance: tool names (`search`→grep, `create`→write, …) and argument names (`file_path`, `command`, `query`, …) are alias-normalized, malformed JSON args get auto-repaired, and edits retry with CRLF and trailing-whitespace normalization — each recovery saves a full model round-trip.
 
 ## Sessions (no database)
 

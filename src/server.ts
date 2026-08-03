@@ -122,19 +122,22 @@ export async function serveMain(flags: CliFlags) {
             system?: string;
             model?: string;
             response_format?: unknown;
+            allowOutside?: boolean;
           };
           if (!body.text) return json({ error: "text required" }, 400);
 
           const config = { ...baseConfig, cwd: live.cwd, sessionId: id };
+          if (config.permissions === "prompt") config.permissions = "yolo"; // interactive-only
           const prov = body.model ? { ...provider, model: body.model } : provider;
           const extra = body.response_format ? { response_format: body.response_format } : undefined;
+          const permit = body.allowOutside ? async () => true : undefined; // undefined → auto-deny
 
           const run = live.chain.then(async () => {
             const ctrl = new AbortController();
             const text = await runTurn(
               config, prov, live!.session, body.text!,
               broadcast(id), ctrl.signal,
-              { extra, systemOverride: body.system },
+              { extra, systemOverride: body.system, permit },
             );
             return text;
           });

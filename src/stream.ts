@@ -80,16 +80,26 @@ class ThinkFilter {
   }
 }
 
+/** Thrown when the provider stops sending bytes mid-stream (idle timeout). */
+export class StreamStallError extends Error {
+  constructor(idleMs: number) {
+    super(`stream stalled: no data from provider for ${Math.round(idleMs / 1000)}s`);
+  }
+}
+
 /**
  * Consume a chat-completions SSE body, emitting text deltas via onText and
  * returning the fully assembled response. Tolerates providers that send a
  * whole tool call in one delta, omit finish_reason, or add unknown fields.
+ * idleTimeoutMs: abort if no bytes (including keep-alive comments) arrive
+ * for that long — a hung provider becomes a bounded, retryable failure.
  */
 export async function consumeSSE(
   body: ReadableStream<Uint8Array>,
   onText: (delta: string) => void,
   signal?: AbortSignal,
   onReasoning?: (delta: string) => void,
+  idleTimeoutMs = 0,
 ): Promise<AssembledResponse> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -103,9 +113,21 @@ export async function consumeSSE(
   const abort = () => reader.cancel().catch(() => {});
   signal?.addEventListener("abort", abort, { once: true });
 
+  const readChunk = (): ReturnType<typeof reader.read> => {
+    if (!idleTimeoutMs) return reader.read();
+    let timer: ReturnType<typeof setTimeout>;
+    const stall = new Promise<never>((_, rej) => {
+      timer = setTimeout(() => {
+        reader.cancel().catch(() => {});
+        rej(new StreamStallError(idleTimeoutMs));
+      }, idleTimeoutMs);
+    });
+    return Promise.race([reader.read(), stall]).finally(() => clearTimeout(timer!)) as ReturnType<typeof reader.read>;
+  };
+
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await readChunk();
       if (done) break;
       buf += decoder.decode(value, { stream: true });
 
