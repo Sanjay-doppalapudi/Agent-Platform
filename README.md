@@ -2,7 +2,7 @@
 
 # Agent Platform (`ap`)
 
-Minimal, fast coding agent CLI. OpenAI-compatible providers only (OpenCode Go, OpenRouter, NVIDIA NIM, any base_url). Six tools: `read` · `write` · `edit` · `bash` · `glob` · `grep`. Zero runtime dependencies — Bun built-ins only. ~45ms cold start.
+Minimal, fast coding agent CLI. OpenAI-compatible providers only (OpenCode Go, OpenRouter, NVIDIA NIM, any base_url). Core tools: `read` · `write` · `edit` · `bash` · `glob` · `grep` (+ `agent` · `fetch` · `todo` · `websearch` in the full profile). Zero runtime dependencies — Bun built-ins only. ~45ms cold start.
 
 ```
 ◆ AP · opencode-go/minimax-m3
@@ -145,7 +145,7 @@ Weaker-model tolerance: tool names (`search`→grep, `create`→write, …) and 
 - **Custom slash commands**: drop `.ap/commands/<name>.md` in a repo (or `<dataDir>/commands/`) — `/name args` expands the file as your message with `$ARGS` substitution; appears in the `/` menu automatically.
 - **`@file` mentions**: `@src/foo.ts` in a message inlines the file (8KB cap) — saves the model a read turn.
 - **Hooks**: config `hooks.preBash/preWrite/preEdit` (nonzero exit blocks the tool with the hook's output) and `hooks.afterEdit` (e.g. `bun x tsc --noEmit` — failures are fed back so the model fixes them itself, max 2 rounds/turn).
-- **`fetch` tool**: URL → readable text (50KB cap). **`todo` tool**: session checklist rendered live in the transcript.
+- **`websearch` tool**: web search via DuckDuckGo's HTML endpoint (plain fetch, no API key) — titles, URLs, snippets. **`fetch` tool**: URL → readable text (50KB cap); `render:true` runs the page through your *installed* Chrome/Edge headless (`--dump-dom`, ~300ms, nothing bundled) so JS-rendered pages work — falls back to plain fetch if no browser is found. **`todo` tool**: session checklist rendered live in the transcript.
 - **`/worktree new <slug> | list | back | merge <slug>`**: isolated git worktree + `ap/<slug>` branch per task — parallel work never collides.
 - **`/compact`**: summarizes the session into a fresh one when context grows.
 - **`AGENTS.md`** project notes supported alongside `AP.md`/`HARNESS.md`; `ap resume` (interactive picker) and `ap sessions search <q>` (ripgrep over transcripts).

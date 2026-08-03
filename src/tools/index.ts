@@ -12,6 +12,7 @@ import { grepTool } from "./grep.ts";
 import { agentTool } from "./agent.ts";
 import { fetchTool } from "./fetch.ts";
 import { todoTool } from "./todo.ts";
+import { websearchTool } from "./websearch.ts";
 
 export interface PermitRequest {
   action: string;
@@ -154,10 +155,13 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "fetch",
-    description: "Fetch a URL and return its readable text (50KB cap).",
+    description: "Fetch a URL and return its readable text (50KB cap); render=true for JS-heavy pages (headless system browser).",
     parameters: {
       type: "object",
-      properties: { url: { type: "string" } },
+      properties: {
+        url: { type: "string" },
+        render: { type: "boolean", description: "render JavaScript via installed Chrome/Edge" },
+      },
       required: ["url"],
     },
     readOnly: true,
@@ -179,6 +183,21 @@ export const TOOLS: ToolDef[] = [
     fullOnly: true,
     run: todoTool,
   },
+  {
+    name: "websearch",
+    description: "Search the web (DuckDuckGo): titles, URLs, snippets — then fetch the promising ones.",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string" },
+        limit: { type: "number", description: "max results, default 8" },
+      },
+      required: ["query"],
+    },
+    readOnly: true,
+    fullOnly: true,
+    run: websearchTool,
+  },
 ];
 
 const byName = new Map(TOOLS.map((t) => [t.name, t]));
@@ -191,6 +210,8 @@ const NAME_ALIASES: Record<string, string> = {
   create: "write", create_file: "write", write_file: "write", save: "write",
   str_replace: "edit", str_replace_editor: "edit", apply_edit: "edit", replace: "edit", edit_file: "edit",
   cat: "read", view: "read", read_file: "read", open: "read", open_file: "read",
+  web_search: "websearch", search_web: "websearch", google: "websearch", web: "websearch", internet_search: "websearch", duckduckgo: "websearch",
+  browse: "fetch", browser: "fetch", visit: "fetch", get_url: "fetch",
 };
 
 /** Canonical tool name for a model-supplied name (exact wins; alias next). */
@@ -208,13 +229,15 @@ const ARG_ALIASES: Record<string, Record<string, string>> = {
   grep: { query: "pattern", regex: "pattern", q: "pattern", search: "pattern", ignore_case: "ignoreCase", case_insensitive: "ignoreCase", include: "glob", dir: "path" },
   glob: { globPattern: "pattern", glob: "pattern", path: "cwd", dir: "cwd", directory: "cwd" },
   agent: { prompt: "task", description: "task", instructions: "task", subtask: "task" },
-  fetch: { link: "url", uri: "url", href: "url" },
+  fetch: { link: "url", uri: "url", href: "url", javascript: "render", js: "render" },
+  websearch: { q: "query", search: "query", term: "query", keywords: "query", text: "query", max_results: "limit", maxResults: "limit", n: "limit", count: "limit" },
 };
 
 const NUMERIC_ARGS: Record<string, string[]> = {
   read: ["offset", "limit"],
   bash: ["timeout"],
   grep: ["context"],
+  websearch: ["limit"],
 };
 
 function normalizeArgs(name: string, args: any): any {

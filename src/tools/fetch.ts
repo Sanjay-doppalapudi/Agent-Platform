@@ -1,4 +1,10 @@
 // fetch tool: URL → readable text (crude HTML strip), capped. Zero deps.
+// render:true runs the page through the SYSTEM's Chrome/Edge in headless mode
+// (--dump-dom, one short-lived process) so JS-rendered pages return content;
+// nothing is bundled and it degrades to plain fetch when no browser exists.
+import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
@@ -18,12 +24,90 @@ function htmlToText(html: string): string {
     .trim();
 }
 
+// Located once per process; null = probed and absent.
+let browserExe: string | null | undefined;
+
+/** Find an installed Chromium-family browser — never download one. */
+function findBrowser(): string | null {
+  if (browserExe !== undefined) return browserExe;
+  const candidates: string[] = [];
+  if (process.platform === "win32") {
+    const env = process.env;
+    for (const base of [env["ProgramFiles"], env["ProgramFiles(x86)"], env["LOCALAPPDATA"]]) {
+      if (!base) continue;
+      candidates.push(
+        join(base, "Google", "Chrome", "Application", "chrome.exe"),
+        join(base, "Microsoft", "Edge", "Application", "msedge.exe"),
+        join(base, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+      );
+    }
+  } else if (process.platform === "darwin") {
+    candidates.push(
+      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+      "/Applications/Chromium.app/Contents/MacOS/Chromium",
+      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+    );
+  }
+  browserExe = candidates.find((c) => existsSync(c)) ?? null;
+  if (!browserExe) {
+    for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave"]) {
+      const found = Bun.which(name);
+      if (found) { browserExe = found; break; }
+    }
+  }
+  return browserExe;
+}
+
+/** Rendered DOM via `chrome --headless --dump-dom`, or null if unavailable. */
+async function renderWithBrowser(url: string, signal: AbortSignal): Promise<string | null> {
+  const exe = findBrowser();
+  if (!exe) return null;
+  const proc = Bun.spawn(
+    [
+      exe,
+      "--headless=new",
+      "--disable-gpu",
+      "--no-first-run",
+      "--no-default-browser-check",
+      "--hide-scrollbars",
+      "--mute-audio",
+      `--user-data-dir=${join(tmpdir(), ".ap", "headless-profile")}`,
+      "--virtual-time-budget=6000", // let JS/fetches settle (virtual clock)
+      "--timeout=15000",
+      "--dump-dom",
+      url,
+    ],
+    { stdout: "pipe", stderr: "ignore", stdin: "ignore" },
+  );
+  const timer = setTimeout(() => proc.kill(), 25_000); // hard backstop
+  const onAbort = () => proc.kill();
+  signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    const html = await new Response(proc.stdout).text();
+    await proc.exited;
+    return html.trim().length > 0 ? html : null;
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    signal.removeEventListener("abort", onAbort);
+  }
+}
+
 export async function fetchTool(
-  args: { url: string },
-  _ctx: ToolCtx,
+  args: { url: string; render?: boolean },
+  ctx: ToolCtx,
 ): Promise<string> {
   if (typeof args.url !== "string" || !/^https?:\/\//i.test(args.url)) {
     throw new ToolError("fetch requires {url} starting with http(s)://");
+  }
+  if (args.render) {
+    const html = await renderWithBrowser(args.url, ctx.signal);
+    if (html !== null) {
+      return truncateMiddle(htmlToText(html), MAX_BYTES) || "(page rendered empty)";
+    }
+    ctx.warn?.("render requested but no Chrome/Edge found — falling back to plain fetch");
   }
   let res: Response;
   try {

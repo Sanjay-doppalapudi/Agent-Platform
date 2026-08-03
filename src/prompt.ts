@@ -61,7 +61,7 @@ Rules:
 
   if (!config.light) {
     prompt += `
-- Use the agent tool to delegate independent subtasks in parallel; use todo to track multi-step work; use fetch for documentation URLs.`;
+- Use the agent tool to delegate independent subtasks in parallel; use todo to track multi-step work; use websearch to find web pages and fetch to read them (render:true if a page needs JavaScript).`;
   }
 
   if (config.mode === "plan") {
