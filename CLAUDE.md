@@ -33,6 +33,10 @@ Data flow per turn: `repl/run/server` → `runTurn()` (agent.ts) → `streamChat
 - **Server** (`server.ts`): endpoint shapes deliberately mirror what 5Pages' `build-server/lib/opencode-runtime.js` calls on opencode (session create → blocking message → SSE events) so it can replace opencode there with a thin adapter.
 - **Credentials** (`creds.ts`): keys live in `<dataDir>/credentials.json`, ACL-locked to the current user. On Windows, icacls grants must use fully-qualified `DOMAIN\user` — a bare username silently grants to nobody when the machine name matches the username.
 - **models.dev** (`models.ts`): provider/model catalog, fetched lazily and disk-cached 24h. Never loaded on the startup path.
+- **Loop mode** (`loop.ts`): `ap loop -p goal [--check cmd]…` — work turn → objective check commands (exit-0 gates, fed back on failure) → auditor turn (fixed-byte VERIFY_PROMPT, read-only steering, `LOOP_DONE` sentinel, confirmation passes when the audit used mutating tools). Stall detector (2 identical audits + no mutations → exit 2) and auto-compaction (summary → fresh session past 60% of contextBudgetChars) keep unlimited looping affordable.
+- **Skills** (`skills.ts`): skills.sh/Claude-format SKILL.md packs. Discovery order `.ap/skills` > `.claude/skills` > `<dataDir>/skills` > `~/.claude/skills`; one line per skill in the system prompt (snapshotted per session), body read on demand. Installer uses the GitHub tree API + raw.githubusercontent — never git/npx. Full profile only.
+
+**The `--light` profile is frozen**: core six tools, smallest prompt, no memory/skills/plans/subagents/checkpoints — new features must never leak into it (gate on `config.light`).
 
 ## Invariants that make it fast — do not break
 

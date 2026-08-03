@@ -66,6 +66,7 @@ const COMMANDS: SlashCommand[] = [
   { name: "/sessions", desc: "list recent sessions" },
   { name: "/sandbox", desc: "show or toggle the write-sandbox", hasArg: true },
   { name: "/agents", desc: "list subagents spawned this session" },
+  { name: "/skills", desc: "list available SKILL.md packs" },
   { name: "/undo", desc: "restore the previous checkpoint" },
   { name: "/diff", desc: "diff of the last checkpoint (+pending)", hasArg: true },
   { name: "/checkpoints", desc: "list workspace checkpoints" },
@@ -508,6 +509,14 @@ export async function replMain(flags: CliFlags) {
             const mark = s.status === "running" ? yellow("●") : s.status === "done" ? green("✓") : red("✗");
             console.log(`${mark} #${s.id} ${dim(`[${s.status}]`)} ${s.task} ${dim(`· ${s.steps} steps · ${secs}s`)}`);
           }
+          continue;
+        }
+        case "skills": {
+          const { discoverSkills } = await import("./skills.ts");
+          const skills = discoverSkills(config);
+          if (!skills.length) { console.log(dim("no skills — install with: ap skills add <owner>/<repo>")); continue; }
+          for (const s of skills) console.log(`${cyan(s.name)} ${dim(`[${s.source}]`)} ${s.description.slice(0, 90)}`);
+          if (config.light) console.log(dim("(--light profile: skills are not injected into the prompt)"));
           continue;
         }
         case "undo": {

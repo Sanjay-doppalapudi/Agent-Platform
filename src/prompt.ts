@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./config.ts";
 import { shellPrefix } from "./tools/bash.ts";
+import { discoverSkills, skillsPromptBlock } from "./skills.ts";
 
 const MEMORY_CHAR_CAP = 2000;
 
@@ -22,6 +23,19 @@ function readMemories(memDir: string): string {
     }
   } catch {}
   return out;
+}
+
+// Skills are snapshotted per session for the same cache-stability reason.
+const skillSnapshots = new Map<string, string>();
+
+function skillsForSession(config: Config): string {
+  const key = `${config.dataDir}|${config.cwd}|${config.sessionId ?? ""}`;
+  let snap = skillSnapshots.get(key);
+  if (snap === undefined) {
+    snap = skillsPromptBlock(discoverSkills(config));
+    skillSnapshots.set(key, snap);
+  }
+  return snap;
 }
 
 // Memories are SNAPSHOTTED once per session: a memory written mid-session is
@@ -77,6 +91,8 @@ PLAN MODE: You have read-only tools. Explore the codebase, then produce a concre
 Memory: when the user corrects you or wants something different from what you did, save it — write ${memDir}\\<short-slug>.md with exactly three lines: "Title: …", "User wanted: …", "Why (guess): …". Consult the saved memories below before repeating a choice the user disliked.`;
     const memories = memoriesForSession(memDir, config.sessionId ?? "");
     if (memories) prompt += `\n\nSaved user preferences:\n${memories}`;
+
+    prompt += skillsForSession(config);
 
     if (config.sessionId) {
       const plansDir = join(tmpdir(), ".ap", config.sessionId);

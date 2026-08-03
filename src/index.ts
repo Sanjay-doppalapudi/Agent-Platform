@@ -21,6 +21,8 @@ export interface CliFlags {
   noSandbox?: boolean;
   allowOutside?: boolean;
   light?: boolean;
+  check?: string[];
+  max?: number;
 }
 
 function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string[] } {
@@ -47,6 +49,8 @@ function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string
       case "--no-sandbox": flags.noSandbox = true; break;
       case "--allow-outside": flags.allowOutside = true; break;
       case "--light": flags.light = true; break;
+      case "--check": (flags.check ??= []).push(argv[++i]!); break;
+      case "--max": flags.max = Number(argv[++i]); break;
       case "--version": case "-v": console.log(VERSION); process.exit(0);
       case "--help": case "-h": printHelp(); process.exit(0);
       default:
@@ -57,35 +61,125 @@ function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string
   return { cmd, flags, rest };
 }
 
-function printHelp() {
+const HELP_TOPICS: Record<string, string> = {
+  run: `ap run -p "task" [flags] — one-shot headless run
+
+  Executes the task, prints the final answer to stdout (tool progress on
+  stderr), exits. Ideal for scripts and CI.
+
+  --json            one AgentEvent per line (NDJSON) on stdout instead
+  --allow-outside   permit writes outside the workspace (otherwise denied)
+  --session <id>    continue an existing session
+  --system <text>   replace the system prompt for this run
+
+  examples:
+    ap run -p "explain the build pipeline" --plan
+    ap run -p "bump all deps and fix breakage" --json | jq -r 'select(.type=="text").delta'`,
+
+  loop: `ap loop -p "goal" [--check "cmd"]... [--max N] [--json] — run until DONE
+
+  Loops work → verify until the goal is verifiably complete, not merely
+  claimed complete. Each iteration: (1) work turn, (2) every --check command
+  must exit 0 — failures are fed straight back with their output (no model
+  tokens wasted), (3) an auditor pass re-verifies the original goal with
+  fresh tool calls and either outputs LOOP_DONE or a gap list that becomes
+  the next work order.
+
+  Stops when: audit says LOOP_DONE and all checks pass · --max reached
+  (exit 2) · the same gaps repeat with zero progress = stalled (exit 2) ·
+  ctrl+c (exit 130). Context auto-compacts, so it can run indefinitely.
+
+  --check "cmd"     objective completion gate; repeatable, all must pass
+  --max <n>         iteration cap (default: unlimited)
+
+  examples:
+    ap loop -p "make all tests pass" --check "bun test"
+    ap loop -p "port utils/ to TypeScript" --check "bun x tsc --noEmit" --check "bun test" --max 20`,
+
+  skills: `ap skills [add <src> [--skill name] | remove <name>] — SKILL.md packs
+
+  Skills are reusable instruction folders (skills.sh / Claude Code format:
+  SKILL.md with name/description frontmatter). Discovered from:
+    <project>/.ap/skills/   <project>/.claude/skills/
+    <dataDir>/skills/       ~/.claude/skills/   (first match wins)
+  Available skills are listed one line each in the system prompt; the agent
+  reads a skill's SKILL.md only when the task matches (cheap prompts).
+
+  ap skills                          list installed skills
+  ap skills add owner/repo           install every skill in a GitHub repo
+  ap skills add owner/repo --skill x install one skill
+  ap skills add https://www.skills.sh/owner/repo/name   same, from skills.sh URL
+  ap skills remove <name>            delete from <dataDir>/skills
+
+  Zero-dep installer: GitHub tree API + raw downloads — no git, no npx.`,
+
+  serve: `ap serve [--port 4141] — HTTP server mode
+
+  POST /session {cwd?}                    → {id}
+  POST /session/:id/message {text, ...}   → blocks → {text, messages}
+  GET  /session/:id/events                → SSE stream of AgentEvents
+  GET  /health · GET /session/:id/messages · DELETE /session/:id`,
+
+  sessions: `ap sessions — list · ap sessions search <q> — ripgrep transcripts
+  ap resume — interactive picker · ap -c — resume most recent
+  Sessions are append-only JSONL in <dataDir>/sessions/<id>.jsonl.`,
+};
+
+function printHelp(topic?: string) {
+  if (topic) {
+    const t = HELP_TOPICS[topic];
+    console.log(t ?? `no extra help for "${topic}" — topics: ${Object.keys(HELP_TOPICS).join(", ")}`);
+    return;
+  }
   console.log(`AP (Agent Platform) ${VERSION} — minimal fast coding agent
+zero deps · ~45ms start · OpenAI-compatible providers · https://github.com/Sanjay-doppalapudi/Agent-Platform
 
 Usage:
-  ap                      interactive REPL
-  ap run -p "task"        one-shot run (--json for NDJSON events)
-  ap serve [--port 4141]  HTTP server mode
-  ap tool <name> '<json>' run a single tool directly (testing)
-  ap prompt [--cwd dir]   print the system prompt used for that directory
-  ap models [query]       search the models.dev catalog (providers + prices)
-  ap auth <provider>      store an API key securely (data dir credentials.json)
-  ap resume               pick a recent session to resume
-  ap sessions [search q]  list sessions, or full-text search them (ripgrep)
+  ap                       interactive REPL in the current directory
+  ap run -p "task"         one-shot run (--json for NDJSON events)
+  ap loop -p "goal"        loop work→verify until the goal is verifiably done
+  ap serve [--port 4141]   HTTP server mode (sessions + SSE)
+  ap skills [add|remove]   list/install SKILL.md packs (skills.sh compatible)
+  ap models [query]        search the models.dev catalog (context + prices)
+  ap auth <provider>       store an API key (hidden input, user-locked file)
+  ap resume                pick a recent session to resume
+  ap sessions [search q]   list sessions / full-text search them
+  ap prompt [--cwd dir]    print the exact system prompt for a directory
+  ap tool <name> '<json>'  run one tool directly, no LLM (testing)
+  ap help <command>        detailed help: ${Object.keys(HELP_TOPICS).join(" · ")}
 
-Flags:
-  --provider <name>   named provider from config
-  -m, --model <id>    model override
-  --base-url <url>    OpenAI-compatible endpoint (with --api-key, no config needed)
-  --api-key <key>     API key override
-  --cwd <dir>         working directory for the agent
-  --session <id>      attach to session id
-  --mode <plan|code>  plan = read-only tools, produce a plan (also: --plan)
-  --resume <id>       resume a saved session (REPL)
-  -c, --continue      resume most recent session (REPL)
-  --json              NDJSON event output (run mode)
-  --no-sandbox        disable the workspace write-sandbox for this invocation
-  --allow-outside     headless: allow writes outside the workspace (run mode)
-  --light             minimal profile: smallest prompt, no memory/plan extras
-  -v, --version       print version`);
+Provider / model:
+  --provider <name>    named provider from config
+  -m, --model <id>     model override for this invocation
+  --base-url <url>     any OpenAI-compatible endpoint (pair with --api-key)
+  --api-key <key>      key override (prefer: ap auth <provider>)
+
+Behavior:
+  --mode <plan|code>   plan = read-only tools + produce a plan (also: --plan)
+  --light              minimal profile: core 6 tools, smallest prompt, no extras
+  --cwd <dir>          working directory for the agent
+  --session <id>       attach to a session   --resume <id> / -c   resume (REPL)
+
+Loop mode:
+  --check "cmd"        objective completion gate (repeatable, all must exit 0)
+  --max <n>            iteration cap (default unlimited)
+
+Safety:
+  --no-sandbox         disable the workspace write-sandbox this invocation
+  --allow-outside      headless runs: allow writes outside the workspace
+
+Output:
+  --json               NDJSON AgentEvents on stdout (run/loop)
+  -v, --version        print version        -h, --help           this screen
+
+Examples:
+  ap                                          # chat in the current repo
+  ap run -p "add input validation to signup"
+  ap loop -p "make bun test pass" --check "bun test"
+  ap skills add vercel-labs/agent-skills --skill web-design-guidelines
+  ap -m deepseek-v4-pro --plan                # plan mode on another model
+
+Keys in the REPL: / commands · @ file picker · ctrl+o details · ctrl+c abort`);
 }
 
 const { cmd, flags, rest } = parseArgs(process.argv.slice(2));
@@ -110,6 +204,53 @@ switch (cmd) {
   case "run": {
     const { runMain } = await import("./run.ts");
     await runMain(flags);
+    break;
+  }
+  case "loop": {
+    const { loopMain } = await import("./loop.ts");
+    await loopMain(flags);
+    break;
+  }
+  case "skills": {
+    const { loadConfig } = await import("./config.ts");
+    const config = loadConfig(flags);
+    const { discoverSkills, parseSource, listRemoteSkills, installSkill, removeSkill } = await import("./skills.ts");
+    const sub = rest[0];
+    if (!sub) {
+      const skills = discoverSkills(config);
+      if (!skills.length) { console.log("no skills installed — try: ap skills add <owner>/<repo>"); break; }
+      for (const s of skills) console.log(`${s.name}  [${s.source}]  ${s.description.slice(0, 100)}\n  ${s.path}`);
+      break;
+    }
+    if (sub === "add" && rest[1]) {
+      const src = parseSource(rest[1]);
+      // --skill after "add" arrives in rest (not a global flag)
+      const skillFlagIdx = rest.indexOf("--skill");
+      const only = skillFlagIdx >= 0 ? rest[skillFlagIdx + 1] : src.skill;
+      const remote = await listRemoteSkills(src.owner, src.repo);
+      if (!remote.length) { console.error(`no SKILL.md found in ${src.owner}/${src.repo}`); process.exit(1); }
+      const targets = only ? remote.filter((r) => r.name === only) : remote;
+      if (!targets.length) {
+        console.error(`skill "${only}" not in ${src.owner}/${src.repo} — available: ${remote.map((r) => r.name).join(", ")}`);
+        process.exit(1);
+      }
+      for (const t of targets) {
+        console.log(`installing ${t.name} from ${src.owner}/${src.repo}…`);
+        const dest = await installSkill(config.dataDir, src.owner, src.repo, t, (l) => console.log(l));
+        console.log(`✓ ${t.name} → ${dest}`);
+      }
+      break;
+    }
+    if (sub === "remove" && rest[1]) {
+      console.log(removeSkill(config.dataDir, rest[1]) ? `removed ${rest[1]}` : `not found in ${config.dataDir}\\skills: ${rest[1]}`);
+      break;
+    }
+    console.error(`usage: ap skills | ap skills add <owner>/<repo> [--skill name] | ap skills remove <name>`);
+    process.exit(1);
+    break;
+  }
+  case "help": {
+    printHelp(rest[0]);
     break;
   }
   case "serve": {

@@ -67,11 +67,14 @@ cd your-project && ap      # go
 ```sh
 ap                      # interactive REPL in the current directory
 ap run -p "task"        # one-shot; --json emits NDJSON AgentEvents
+ap loop -p "goal"       # loop work→verify until the goal is verifiably done
+ap skills               # list / install SKILL.md packs (skills.sh compatible)
 ap serve [--port 4141]  # HTTP server mode (sessions + SSE)
 ap models [query]       # search the models.dev catalog (context + pricing)
 ap auth <provider>      # store an API key
 ap prompt [--cwd dir]   # print the system prompt used for a directory
 ap tool grep '{"pattern":"foo"}'   # run one tool directly (testing)
+ap help <command>       # detailed per-command help (run · loop · skills · serve · sessions)
 ```
 
 Common flags: `--provider <name>` · `-m/--model <id>` · `--cwd <dir>` · `--mode plan|code` (`--plan`) · `--session <id>` · `-c/--continue` · `--base-url <url> --api-key <key>` for any ad-hoc endpoint.
@@ -149,6 +152,31 @@ Weaker-model tolerance: tool names (`search`→grep, `create`→write, …) and 
 - **`/worktree new <slug> | list | back | merge <slug>`**: isolated git worktree + `ap/<slug>` branch per task — parallel work never collides.
 - **`/compact`**: summarizes the session into a fresh one when context grows.
 - **`AGENTS.md`** project notes supported alongside `AP.md`/`HARNESS.md`; `ap resume` (interactive picker) and `ap sessions search <q>` (ripgrep over transcripts).
+
+## Loop mode — run until verifiably done
+
+`ap loop -p "goal"` keeps working until the goal is **verified** complete, not merely claimed complete:
+
+```sh
+ap loop -p "make all tests pass" --check "bun test"
+ap loop -p "port utils/ to TS" --check "bun x tsc --noEmit" --check "bun test" --max 20
+```
+
+Each iteration: **work turn** → **objective gates** (every `--check` command must exit 0 — failures are fed back with their output, costing zero model tokens) → **auditor turn** (re-verifies the original goal with fresh read-only tool calls; outputs `LOOP_DONE` or a gap list that becomes the next work order). Engineered to be cheap to run indefinitely: one append-only session so provider prefix caching hits every iteration, fixed-byte verifier prompt, a **stall detector** (identical audits with no file changes twice → exit 2 instead of burning tokens forever), auto-**compaction** (near the context budget the session is summarized into a fresh one), and a checkpoint per mutating iteration (`/undo`-able trail). Exit codes: `0` verified done · `2` stalled or `--max` reached · `130` ctrl+c.
+
+## Skills (skills.sh / Claude Code compatible)
+
+Skills are reusable instruction folders — `SKILL.md` with `name`/`description` frontmatter ([format docs](https://www.skills.sh/docs)). AP discovers them from `<project>/.ap/skills/`, `<project>/.claude/skills/`, `<dataDir>/skills/`, and `~/.claude/skills/` (so skills you already installed for Claude Code just work). Each skill costs **one line** in the system prompt; the agent reads the full SKILL.md only when a task matches (progressive disclosure — prompts stay small and cacheable).
+
+```sh
+ap skills                                        # list installed
+ap skills add vercel-labs/agent-skills           # install every skill in a repo
+ap skills add mattpocock/skills --skill loop-me  # install one
+ap skills add https://www.skills.sh/owner/repo/name   # skills.sh URLs work too
+ap skills remove <name>
+```
+
+The installer is zero-dep: GitHub tree API + raw downloads — no git, no npx. `/skills` lists them in the REPL. Skills are a full-profile feature; `--light` never injects them.
 
 ## Sessions (no database)
 
