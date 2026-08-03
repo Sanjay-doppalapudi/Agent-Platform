@@ -1,6 +1,6 @@
 {
   "name": "@sanjaydoppalapudi/agentplatform",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Agent Platform (ap) — minimal, fast coding agent CLI (OpenAI-compatible providers)",
   "publishConfig": {
     "access": "public"

@@ -2,7 +2,7 @@
 // Entry point: parse argv, dispatch to a mode via lazy import so the hot path
 // (startup → first prompt) loads only what it needs.
 
-const VERSION = "0.1.8";
+const VERSION = "0.1.9";
 
 export interface CliFlags {
   provider?: string;
@@ -68,6 +68,8 @@ Usage:
   ap prompt [--cwd dir]   print the system prompt used for that directory
   ap models [query]       search the models.dev catalog (providers + prices)
   ap auth <provider>      store an API key securely (data dir credentials.json)
+  ap resume               pick a recent session to resume
+  ap sessions [search q]  list sessions, or full-text search them (ripgrep)
 
 Flags:
   --provider <name>   named provider from config
@@ -162,6 +164,48 @@ switch (cmd) {
     if (!key) { console.error("no key entered"); process.exit(1); }
     setKey(config.dataDir, prov, key);
     console.log(`stored key for "${prov}" in ${config.dataDir}\\credentials.json (user-only access)`);
+    break;
+  }
+  case "resume": {
+    const { loadConfig } = await import("./config.ts");
+    const { Session } = await import("./session.ts");
+    const config = loadConfig(flags);
+    const sessions = Session.list(config.dataDir, 15);
+    if (!sessions.length) { console.log("no sessions yet"); break; }
+    sessions.forEach((s, i) => console.log(`${i + 1}. ${s.id}  ${new Date(s.mtime).toLocaleString()}`));
+    const { createInterface } = await import("node:readline");
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const answer = await new Promise<string>((res) => rl.question("resume which? [1] ", res));
+    rl.close();
+    const pick = sessions[Math.max(1, Number(answer) || 1) - 1];
+    if (!pick) { console.error("no such entry"); process.exit(1); }
+    flags.resume = pick.id;
+    const { replMain } = await import("./repl.ts");
+    await replMain(flags);
+    break;
+  }
+  case "sessions": {
+    const { loadConfig } = await import("./config.ts");
+    const { Session } = await import("./session.ts");
+    const { join } = await import("node:path");
+    const config = loadConfig(flags);
+    if (rest[0] === "search" && rest[1]) {
+      const query = rest.slice(1).join(" ");
+      const dir = join(config.dataDir, "sessions");
+      const p = Bun.spawnSync(["rg", "-i", "-l", "--no-messages", query, dir], { stdout: "pipe", stderr: "ignore" });
+      const files = (p.stdout?.toString() ?? "").split("\n").filter(Boolean);
+      if (!files.length) { console.log("no sessions match"); break; }
+      for (const f of files.slice(0, 20)) {
+        const id = f.replace(/\\/g, "/").split("/").pop()!.replace(/\.jsonl$/, "");
+        const m = Bun.spawnSync(["rg", "-i", "-m", "1", "-o", `.{0,40}${query}.{0,40}`, f], { stdout: "pipe", stderr: "ignore" });
+        console.log(`${id}  ${(m.stdout?.toString() ?? "").split("\n")[0]?.trim() ?? ""}`);
+      }
+      console.log(`\nresume with: ap --resume <id>`);
+      break;
+    }
+    for (const s of Session.list(config.dataDir, 20)) {
+      console.log(`${s.id}  ${new Date(s.mtime).toLocaleString()}`);
+    }
     break;
   }
   case "": {

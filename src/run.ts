@@ -2,6 +2,8 @@
 // --json → one AgentEvent per line (NDJSON) on stdout.
 import { loadConfig, resolveProvider } from "./config.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
+import { Checkpoints } from "./checkpoint.ts";
+import { getTool } from "./tools/index.ts";
 import { MdRenderer } from "./md.ts";
 import { renderDiff, toolLabel, toolSummary } from "./ui.ts";
 import { Session } from "./session.ts";
@@ -27,8 +29,10 @@ export async function runMain(flags: CliFlags) {
   const md = !json && process.stdout.isTTY ? new MdRenderer() : null;
   const active = new Map<string, string>(); // running tools: id → label
   let sawText = false;
+  let mutated = false;
   const emit = (e: AgentEvent) => {
     if (json) {
+      if (e.type === "tool_end" && !e.error && getTool(e.name)?.readOnly === false) mutated = true;
       process.stdout.write(JSON.stringify(e) + "\n");
       return;
     }
@@ -38,6 +42,9 @@ export async function runMain(flags: CliFlags) {
         break;
       case "warn":
         process.stderr.write(`\x1b[33m⚠ ${e.message}\x1b[0m\n`);
+        break;
+      case "subline":
+        process.stderr.write(`\x1b[2m  ${e.text}\x1b[0m\n`);
         break;
       case "text":
         process.stdout.write(md ? md.push(e.delta) : e.delta);
@@ -58,6 +65,7 @@ export async function runMain(flags: CliFlags) {
       case "tool_end": {
         const label = active.get(e.id) ?? e.name;
         active.delete(e.id);
+        if (!e.error && getTool(e.name)?.readOnly === false) mutated = true;
         process.stderr.write(`${e.error ? "✗" : "✓"} ${label} · ${toolSummary(e.name, e.output, e.error)} · ${e.ms}ms\n`);
         break;
       }
@@ -76,6 +84,13 @@ export async function runMain(flags: CliFlags) {
       permit: flags.allowOutside ? async () => true : undefined, // undefined → auto-deny
     });
     if (md) process.stdout.write(md.flush());
+    if (mutated) {
+      const cp = new Checkpoints(config, session.id);
+      if (cp.available()) {
+        const hash = cp.commit(flags.prompt);
+        if (hash && !json) process.stderr.write(`\x1b[2m✓ checkpoint ${hash}\x1b[0m\n`);
+      }
+    }
     if (!json) process.stdout.write("\n");
     process.exit(0);
   } catch (e) {

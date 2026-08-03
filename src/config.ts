@@ -26,6 +26,11 @@ export interface Config {
   /** Light profile: smallest possible prompt + no optional features. Every
    *  non-essential feature (current and future) must check this flag. */
   light: boolean;
+  /** Shadow-repo checkpoints after mutating turns (off in light profile). */
+  checkpoints: "on" | "off";
+  /** Shell hooks: preBash/preWrite/preEdit (nonzero exit blocks the tool),
+   *  afterEdit (nonzero output is fed back to the model to self-fix). */
+  hooks?: Record<string, string>;
   streamIdleSeconds: number;
   maxIterations: number;
   contextBudgetChars: number;
@@ -62,6 +67,7 @@ const DEFAULTS: Omit<Config, "provider" | "providers" | "cwd"> = {
   sandbox: "workspace",
   bashGuard: "on",
   light: false,
+  checkpoints: "on",
   streamIdleSeconds: 90,
   maxIterations: 40,
   contextBudgetChars: 400_000,

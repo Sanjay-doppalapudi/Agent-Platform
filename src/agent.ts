@@ -5,13 +5,14 @@ import type { Config, ResolvedProvider } from "./config.ts";
 import { ProviderError, streamChat, type Msg } from "./provider.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import type { Session } from "./session.ts";
-import { autoDenyPermit, execTool, getTool, resolveToolName, toolSchemasFor, type PermitFn } from "./tools/index.ts";
+import { autoDenyPermit, execTool, getTool, isParallelSafe, resolveToolName, toolSchemasFor, type PermitFn } from "./tools/index.ts";
 import type { Usage } from "./stream.ts";
 
 export type AgentEvent =
   | { type: "text"; delta: string }
   | { type: "reasoning"; delta: string }
   | { type: "warn"; message: string }
+  | { type: "subline"; text: string }
   | { type: "tool_start"; id: string; name: string; args: unknown }
   | { type: "tool_end"; id: string; name: string; output: string; ms: number; error?: boolean }
   | { type: "turn_end"; usage?: Usage }
@@ -21,6 +22,27 @@ export type AgentEvent =
 export type Emit = (e: AgentEvent) => void;
 
 const KEEP_RECENT_TOOL_MSGS = 12;
+const MAX_HOOK_CONTINUATIONS = 2;
+
+/** Run a config hook command; returns {ok, output}. 30s cap, never throws. */
+function runHook(cmd: string, cwd: string, tool: string, argsJson: string): { ok: boolean; output: string } {
+  try {
+    const p = Bun.spawnSync(
+      process.platform === "win32" ? ["cmd", "/c", cmd] : ["sh", "-c", cmd],
+      {
+        cwd,
+        env: { ...process.env, AP_TOOL: tool, AP_ARGS: argsJson.slice(0, 8000) },
+        timeout: 30_000,
+        stdout: "pipe",
+        stderr: "pipe",
+      } as any,
+    );
+    const output = ((p.stdout?.toString() ?? "") + (p.stderr?.toString() ?? "")).trim().slice(0, 8000);
+    return { ok: p.exitCode === 0, output };
+  } catch (e) {
+    return { ok: false, output: `hook failed to run: ${(e as Error).message}` };
+  }
+}
 
 export interface RunOptions {
   extra?: Record<string, unknown>; // passthrough body fields (e.g. response_format)
@@ -43,6 +65,8 @@ export async function runTurn(
 
   let finalText = "";
   let midStreamRetried = false; // one mid-stream retry per turn
+  let hookContinuations = 0;
+  const HOOK_PRE: Record<string, string> = { bash: "preBash", write: "preWrite", edit: "preEdit" };
   for (let iter = 0; iter < config.maxIterations; iter++) {
     if (signal.aborted) break;
     const msgs: Msg[] = [{ role: "system", content: system }, ...session.history];
@@ -53,7 +77,7 @@ export async function runTurn(
       res = await streamChat(
         provider,
         msgs,
-        toolSchemasFor(config.mode),
+        toolSchemasFor(config),
         (delta) => emit({ type: "text", delta }),
         signal,
         opts.extra,
@@ -97,6 +121,7 @@ export async function runTurn(
       config,
       permit: opts.permit ?? autoDenyPermit,
       warn: (message: string) => emit({ type: "warn", message }),
+      subline: (text: string) => emit({ type: "subline", text }),
     };
     const results = new Array<{ output: string; error: boolean; ms: number }>(res.toolCalls.length);
     const policy = config.parallelPolicy;
@@ -109,19 +134,28 @@ export async function runTurn(
       emit({ type: "tool_start", id: tc.id, name: canonical, args });
       const start = performance.now();
       let r: { output: string; error: boolean };
+      const preHook = !config.light && config.hooks?.[HOOK_PRE[canonical] ?? ""];
       if (config.mode === "plan" && !getTool(canonical)?.readOnly) {
         // Plan mode is structurally read-only; block hallucinated mutations too.
         r = { output: "blocked: plan mode is read-only (switch to code mode to apply changes)", error: true };
-      } else if (config.permissions === "prompt" && getTool(canonical) && !getTool(canonical)!.readOnly) {
-        const ok = await ctx.permit({
-          action: `run ${canonical}`,
-          detail: `${canonical} ${tc.function.arguments.slice(0, 120)}`,
-        });
-        r = ok
-          ? await execTool(tc.function.name, tc.function.arguments, ctx)
-          : { output: "denied by user", error: true };
       } else {
-        r = await execTool(tc.function.name, tc.function.arguments, ctx);
+        let allowed = true;
+        if (config.permissions === "prompt" && getTool(canonical) && !getTool(canonical)!.readOnly) {
+          allowed = await ctx.permit({
+            action: `run ${canonical}`,
+            detail: `${canonical} ${tc.function.arguments.slice(0, 120)}`,
+          });
+        }
+        if (!allowed) {
+          r = { output: "denied by user", error: true };
+        } else if (preHook) {
+          const h = runHook(preHook, config.cwd, canonical, tc.function.arguments);
+          r = h.ok
+            ? await execTool(tc.function.name, tc.function.arguments, ctx)
+            : { output: `blocked by ${HOOK_PRE[canonical]} hook:\n${h.output || "(no output)"}`, error: true };
+        } else {
+          r = await execTool(tc.function.name, tc.function.arguments, ctx);
+        }
       }
       const ms = Math.round(performance.now() - start);
       results[i] = { ...r, ms };
@@ -136,7 +170,7 @@ export async function runTurn(
       const readIdx: number[] = [];
       const mutIdx: number[] = [];
       res.toolCalls.forEach((tc, i) => {
-        (getTool(resolveToolName(tc.function.name))?.readOnly ? readIdx : mutIdx).push(i);
+        (isParallelSafe(tc.function.name) ? readIdx : mutIdx).push(i);
       });
       await Promise.all(readIdx.map(runOne));
       for (const i of mutIdx) await runOne(i);
@@ -148,6 +182,24 @@ export async function runTurn(
         tool_call_id: res.toolCalls[i]!.id,
         content: results[i]!.output,
       });
+    }
+
+    // afterEdit hook: if this iteration mutated files, run diagnostics; a
+    // nonzero exit feeds the output back so the model fixes it next call.
+    const afterEdit = !config.light && config.hooks?.afterEdit;
+    if (afterEdit && hookContinuations < MAX_HOOK_CONTINUATIONS) {
+      const mutated = res.toolCalls.some((tc, i) => {
+        const c = resolveToolName(tc.function.name);
+        return (c === "write" || c === "edit") && !results[i]!.error;
+      });
+      if (mutated) {
+        const h = runHook(afterEdit, config.cwd, "afterEdit", "{}");
+        if (!h.ok && h.output) {
+          hookContinuations++;
+          emit({ type: "warn", message: `afterEdit hook reported problems — asking the model to fix them` });
+          session.append({ role: "user", content: `[afterEdit hook output — fix these issues]\n${h.output}` });
+        }
+      }
     }
   }
 

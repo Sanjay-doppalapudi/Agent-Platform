@@ -138,6 +138,18 @@ Reads are unrestricted; **mutations are jailed**: `write`/`edit` outside the wor
 
 Weaker-model tolerance: tool names (`search`→grep, `create`→write, …) and argument names (`file_path`, `command`, `query`, …) are alias-normalized, malformed JSON args get auto-repaired, and edits retry with CRLF and trailing-whitespace normalization — each recovery saves a full model round-trip.
 
+## Full-profile features (absent in `--light`)
+
+- **Checkpoints**: every mutating turn auto-commits the workspace to a shadow git repo (your real git history is untouched; works in non-git folders). `/undo`, `/diff [n]`, `/checkpoints`, `/restore <hash>`.
+- **Subagents**: the `agent` tool delegates independent subtasks to parallel child processes (`ap run --light` under the hood — children can't recurse). Live nested `↳` progress lines stream in, and `/agents` lists every subagent with status, steps, and duration.
+- **Custom slash commands**: drop `.ap/commands/<name>.md` in a repo (or `<dataDir>/commands/`) — `/name args` expands the file as your message with `$ARGS` substitution; appears in the `/` menu automatically.
+- **`@file` mentions**: `@src/foo.ts` in a message inlines the file (8KB cap) — saves the model a read turn.
+- **Hooks**: config `hooks.preBash/preWrite/preEdit` (nonzero exit blocks the tool with the hook's output) and `hooks.afterEdit` (e.g. `bun x tsc --noEmit` — failures are fed back so the model fixes them itself, max 2 rounds/turn).
+- **`fetch` tool**: URL → readable text (50KB cap). **`todo` tool**: session checklist rendered live in the transcript.
+- **`/worktree new <slug> | list | back | merge <slug>`**: isolated git worktree + `ap/<slug>` branch per task — parallel work never collides.
+- **`/compact`**: summarizes the session into a fresh one when context grows.
+- **`AGENTS.md`** project notes supported alongside `AP.md`/`HARNESS.md`; `ap resume` (interactive picker) and `ap sessions search <q>` (ripgrep over transcripts).
+
 ## Sessions (no database)
 
 Each session is one append-only JSONL file in `<dataDir>/sessions/<id>.jsonl` — a `meta` line, then one line per message, flushed on every append. Crash-safe (torn last line ignored), resumable (`-c`, `--resume <id>`, `/resume`), greppable, and deleted by deleting the file.

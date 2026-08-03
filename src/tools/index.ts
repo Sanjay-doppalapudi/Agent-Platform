@@ -9,6 +9,9 @@ import { editTool } from "./edit.ts";
 import { bashTool } from "./bash.ts";
 import { globTool } from "./glob.ts";
 import { grepTool } from "./grep.ts";
+import { agentTool } from "./agent.ts";
+import { fetchTool } from "./fetch.ts";
+import { todoTool } from "./todo.ts";
 
 export interface PermitRequest {
   action: string;
@@ -26,6 +29,8 @@ export interface ToolCtx {
   config: Config;
   permit: PermitFn;
   warn?: (msg: string) => void;
+  /** Nested progress line (subagent activity) — rendered dim + indented. */
+  subline?: (text: string) => void;
 }
 
 export interface ToolDef {
@@ -33,6 +38,10 @@ export interface ToolDef {
   description: string;
   parameters: object;
   readOnly: boolean;
+  /** Safe to run concurrently with other tools (defaults to readOnly). */
+  parallelSafe?: boolean;
+  /** Excluded from the --light profile's schema set. */
+  fullOnly?: boolean;
   run(args: any, ctx: ToolCtx): Promise<string>;
 }
 
@@ -126,6 +135,50 @@ export const TOOLS: ToolDef[] = [
     readOnly: true,
     run: grepTool,
   },
+  {
+    name: "agent",
+    description: "Delegate an independent subtask to a parallel subagent; returns its final answer.",
+    parameters: {
+      type: "object",
+      properties: {
+        task: { type: "string", description: "complete, self-contained task description" },
+        cwd: { type: "string" },
+        timeout: { type: "number", description: "seconds, default 300" },
+      },
+      required: ["task"],
+    },
+    readOnly: false,
+    parallelSafe: true, // children serialize their own mutations
+    fullOnly: true,
+    run: agentTool,
+  },
+  {
+    name: "fetch",
+    description: "Fetch a URL and return its readable text (50KB cap).",
+    parameters: {
+      type: "object",
+      properties: { url: { type: "string" } },
+      required: ["url"],
+    },
+    readOnly: true,
+    fullOnly: true,
+    run: fetchTool,
+  },
+  {
+    name: "todo",
+    description: "Track a task checklist: add items, mark done by number, clear.",
+    parameters: {
+      type: "object",
+      properties: {
+        add: { type: "array", items: { type: "string" } },
+        done: { type: "array", items: { type: "number" } },
+        clear: { type: "boolean" },
+      },
+    },
+    readOnly: true,
+    fullOnly: true,
+    run: todoTool,
+  },
 ];
 
 const byName = new Map(TOOLS.map((t) => [t.name, t]));
@@ -154,6 +207,8 @@ const ARG_ALIASES: Record<string, Record<string, string>> = {
   bash: { command: "cmd", script: "cmd", workdir: "cwd", working_dir: "cwd", workingDir: "cwd", directory: "cwd" },
   grep: { query: "pattern", regex: "pattern", q: "pattern", search: "pattern", ignore_case: "ignoreCase", case_insensitive: "ignoreCase", include: "glob", dir: "path" },
   glob: { globPattern: "pattern", glob: "pattern", path: "cwd", dir: "cwd", directory: "cwd" },
+  agent: { prompt: "task", description: "task", instructions: "task", subtask: "task" },
+  fetch: { link: "url", uri: "url", href: "url" },
 };
 
 const NUMERIC_ARGS: Record<string, string[]> = {
@@ -196,20 +251,29 @@ export function getTool(name: string): ToolDef | undefined {
   return byName.get(name);
 }
 
-/** OpenAI tool schemas — built once, stable order/bytes. */
-export const TOOL_SCHEMAS: ToolSchema[] = TOOLS.map((t) => ({
+const toSchema = (t: ToolDef): ToolSchema => ({
   type: "function",
   function: { name: t.name, description: t.description, parameters: t.parameters },
-}));
+});
 
-// Plan mode: read-only subset, same fixed order — its own stable cache prefix.
-const PLAN_SCHEMAS: ToolSchema[] = TOOLS.filter((t) => t.readOnly).map((t) => ({
-  type: "function" as const,
-  function: { name: t.name, description: t.description, parameters: t.parameters },
-}));
+// Four fixed schema sets (full/light × code/plan) — built once, stable
+// order/bytes per profile, which is what makes prefix caching hit.
+const FULL_CODE: ToolSchema[] = TOOLS.map(toSchema);
+const FULL_PLAN: ToolSchema[] = TOOLS.filter((t) => t.readOnly).map(toSchema);
+const LIGHT_CODE: ToolSchema[] = TOOLS.filter((t) => !t.fullOnly).map(toSchema);
+const LIGHT_PLAN: ToolSchema[] = TOOLS.filter((t) => !t.fullOnly && t.readOnly).map(toSchema);
 
-export function toolSchemasFor(mode: "plan" | "code"): ToolSchema[] {
-  return mode === "plan" ? PLAN_SCHEMAS : TOOL_SCHEMAS;
+export const TOOL_SCHEMAS = FULL_CODE; // back-compat export
+
+export function toolSchemasFor(config: Config): ToolSchema[] {
+  if (config.light) return config.mode === "plan" ? LIGHT_PLAN : LIGHT_CODE;
+  return config.mode === "plan" ? FULL_PLAN : FULL_CODE;
+}
+
+/** Safe to run concurrently (read-only tools + explicitly parallel-safe ones). */
+export function isParallelSafe(name: string): boolean {
+  const t = byName.get(resolveToolName(name));
+  return !!t && (t.parallelSafe ?? t.readOnly);
 }
 
 /** Execute one tool call; returns model-facing result text (errors included). */

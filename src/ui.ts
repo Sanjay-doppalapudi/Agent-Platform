@@ -24,6 +24,9 @@ export function toolLabel(name: string, args: any): string {
     case "bash": return `bash ${trunc(String(a.cmd ?? "").replace(/\s+/g, " "), 70)}${a.background ? " &" : ""}`;
     case "glob": return `glob ${a.pattern ?? ""}`;
     case "grep": return `grep ${trunc(String(a.pattern ?? ""), 40)}${a.glob ? ` (${a.glob})` : ""}${a.mode && a.mode !== "content" ? ` [${a.mode}]` : ""}`;
+    case "agent": return `◇ agent ${trunc(String(a.task ?? "").replace(/\s+/g, " "), 60)}`;
+    case "fetch": return `fetch ${trunc(String(a.url ?? ""), 60)}`;
+    case "todo": return "todo";
     default: return `${name} ${trunc(JSON.stringify(a), 60)}`;
   }
 }
@@ -46,6 +49,9 @@ export function toolSummary(name: string, output: string, error?: boolean): stri
       if (first.startsWith("started background")) return trunc(first.replace("started background process ", ""), 60);
       return output === "(no output)" ? "ok" : `${lineCount(output)} lines out`;
     }
+    case "agent": return `${lineCount(output)} lines back`;
+    case "fetch": return `${Math.round(Buffer.byteLength(output, "utf8") / 1024)}KB`;
+    case "todo": return trunc(output.split("\n")[0] ?? "", 40);
     default: return "";
   }
 }

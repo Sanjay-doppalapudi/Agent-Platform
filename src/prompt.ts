@@ -59,6 +59,11 @@ Rules:
 - Writes outside the workspace need user permission; dangerous shell commands are blocked automatically — prefer working inside the workspace.`;
   }
 
+  if (!config.light) {
+    prompt += `
+- Use the agent tool to delegate independent subtasks in parallel; use todo to track multi-step work; use fetch for documentation URLs.`;
+  }
+
   if (config.mode === "plan") {
     prompt += `
 
@@ -79,7 +84,7 @@ Memory: when the user corrects you or wants something different from what you di
     }
   }
 
-  for (const name of ["AP.md", "HARNESS.md"]) {
+  for (const name of ["AP.md", "AGENTS.md", "HARNESS.md"]) {
     const projectFile = join(config.cwd, name);
     if (existsSync(projectFile)) {
       try {

@@ -1,11 +1,15 @@
 // Interactive REPL: slash-command menu, streaming markdown render, ctrl+o
 // detail toggle (true collapse/expand via in-place re-render), ctrl+c aborts.
 import { emitKeypressEvents } from "node:readline";
-import { dirname, resolve } from "node:path";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { loadConfig, resolveProvider } from "./config.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
+import { Checkpoints } from "./checkpoint.ts";
+import { streamChat } from "./provider.ts";
 import { sandboxRoots } from "./tools/shared.ts";
-import type { PermitFn } from "./tools/index.ts";
+import { getTool, type PermitFn } from "./tools/index.ts";
+import { listSubagents } from "./tools/agent.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import { readLine, type SlashCommand } from "./input.ts";
 import { MdRenderer } from "./md.ts";
@@ -46,6 +50,12 @@ function rowsUp(s: string): number {
   return rows;
 }
 
+const BUILTIN_CMDS = new Set([
+  "exit", "q", "quit", "new", "resume", "session", "sessions", "sandbox",
+  "model", "models", "mode", "plan", "code", "system", "context", "agents",
+  "undo", "diff", "checkpoints", "restore", "worktree", "compact",
+]);
+
 const COMMANDS: SlashCommand[] = [
   { name: "/plan", desc: "read-only mode: explore & produce a plan" },
   { name: "/code", desc: "full mode: all tools (default)" },
@@ -55,6 +65,13 @@ const COMMANDS: SlashCommand[] = [
   { name: "/resume", desc: "resume a session by id", hasArg: true },
   { name: "/sessions", desc: "list recent sessions" },
   { name: "/sandbox", desc: "show or toggle the write-sandbox", hasArg: true },
+  { name: "/agents", desc: "list subagents spawned this session" },
+  { name: "/undo", desc: "restore the previous checkpoint" },
+  { name: "/diff", desc: "diff of the last checkpoint (+pending)", hasArg: true },
+  { name: "/checkpoints", desc: "list workspace checkpoints" },
+  { name: "/restore", desc: "restore a checkpoint by hash", hasArg: true },
+  { name: "/worktree", desc: "new <slug> | list | back | merge <slug>", hasArg: true },
+  { name: "/compact", desc: "summarize history into a fresh session" },
   { name: "/system", desc: "show the system prompt" },
   { name: "/context", desc: "show context/token usage" },
   { name: "/exit", desc: "quit" },
@@ -146,10 +163,18 @@ class TurnRenderer {
       case "tool_end": {
         const mark = e.error ? red("✗") : green("✓");
         const summary = toolSummary(e.name, e.output, e.error);
-        return `${BAR}${mark} ${label ?? e.name}${dim(` · ${summary} · ${e.ms}ms`)}\n`;
+        let out = `${BAR}${mark} ${label ?? e.name}${dim(` · ${summary} · ${e.ms}ms`)}\n`;
+        if (e.name === "todo" && !e.error) {
+          // The checklist IS the progress display — always show it.
+          for (const l of e.output.split("\n").slice(1)) out += `${BAR}${dim(`  ${l}`)}\n`;
+        }
+        return out;
       }
       case "turn_end":
         return this.endSegment();
+      case "subline":
+        // Nested subagent progress — details channel only.
+        return this.details ? `${this.endSegment()}${BAR}${dim(`  ${e.text}`)}\n` : "";
       case "warn":
         return `${this.endSegment()}${BAR}${yellow(`⚠ ${e.message}`)}\n`;
       case "error":
@@ -218,6 +243,30 @@ export async function replMain(flags: CliFlags) {
   let sessionAllows = new Set<string>();
   let permitChain: Promise<unknown> = Promise.resolve();
 
+  let cp = new Checkpoints(config, session.id);
+  const originalCwd = config.cwd;
+
+  // Custom slash commands: .ap/commands/<name>.md in the repo or data dir.
+  const customCommands = new Map<string, { file: string; desc: string }>();
+  if (!config.light) {
+    for (const dir of [join(config.cwd, ".ap", "commands"), join(config.dataDir, "commands")]) {
+      try {
+        for (const f of readdirSync(dir)) {
+          if (!f.endsWith(".md")) continue;
+          const name = basename(f, ".md").toLowerCase();
+          if (customCommands.has(name)) continue;
+          let desc = "custom command";
+          try { desc = (readFileSync(join(dir, f), "utf8").split("\n")[0] ?? "").replace(/^#+\s*/, "").slice(0, 40) || desc; } catch {}
+          customCommands.set(name, { file: join(dir, f), desc });
+        }
+      } catch {}
+    }
+  }
+  const menuCommands = [
+    ...COMMANDS,
+    ...[...customCommands.entries()].map(([n, c]) => ({ name: `/${n}`, desc: c.desc, hasArg: true })),
+  ];
+
   // Turn buffers: what a full render looks like, what a compact render looks
   // like, and what is actually on screen right now. ctrl+o erases the on-
   // screen block (cursor-up + clear) and prints the other form.
@@ -283,9 +332,9 @@ export async function replMain(flags: CliFlags) {
   for (;;) {
     const promptLabel = `${dim(config.mode)} ${cyan("›")} `;
     process.stdout.write("\n");
-    const input = (await readLine({
+    let input = (await readLine({
       prompt: promptLabel,
-      commands: COMMANDS,
+      commands: menuCommands,
       history,
       onCtrlO: () => toggleVerbose(true),
     }))?.trim();
@@ -296,12 +345,24 @@ export async function replMain(flags: CliFlags) {
 
     if (input.startsWith("/") || input.startsWith(":")) {
       const [cmd, ...rest] = input.slice(1).split(/\s+/);
+      // Custom command? (builtins always win) — expand template and run as a turn.
+      const custom = customCommands.get((cmd ?? "").toLowerCase());
+      if (custom && !BUILTIN_CMDS.has((cmd ?? "").toLowerCase())) {
+        try {
+          input = readFileSync(custom.file, "utf8").replace(/\$(ARGUMENTS|ARGS)\b/g, rest.join(" ")).trim();
+          process.stdout.write(dim(`[/${cmd} → ${basename(custom.file)}]\n`));
+        } catch (e) {
+          console.log(dim(`failed to read ${custom.file}: ${(e as Error).message}`));
+          continue;
+        }
+      } else {
       switch (cmd) {
         case "exit": case "q": case "quit": exit(0);
         case "new":
           session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
           config.sessionId = session.id;
           sessionAllows = new Set();
+          cp = new Checkpoints(config, session.id);
           console.log(dim(`new session ${session.id}`));
           continue;
         case "resume":
@@ -309,6 +370,7 @@ export async function replMain(flags: CliFlags) {
             session = Session.load(config.dataDir, rest[0] ?? "");
             config.sessionId = session.id;
             sessionAllows = new Set();
+            cp = new Checkpoints(config, session.id);
             console.log(dim(`resumed ${session.id} (${session.history.length} msgs)`));
           } catch (e) { console.log(dim((e as Error).message)); }
           continue;
@@ -427,13 +489,131 @@ export async function replMain(flags: CliFlags) {
           }
           continue;
         }
+        case "agents": {
+          const subs = listSubagents();
+          if (!subs.length) { console.log(dim("no subagents spawned this session")); continue; }
+          for (const s of subs) {
+            const secs = (((s.endedAt ?? Date.now()) - s.startedAt) / 1000).toFixed(1);
+            const mark = s.status === "running" ? yellow("●") : s.status === "done" ? green("✓") : red("✗");
+            console.log(`${mark} #${s.id} ${dim(`[${s.status}]`)} ${s.task} ${dim(`· ${s.steps} steps · ${secs}s`)}`);
+          }
+          continue;
+        }
+        case "undo": {
+          const cps = cp.list(2);
+          if (cps.length < 2) { console.log(dim("no earlier checkpoint to restore")); continue; }
+          const target = cps[1]!;
+          const r = cp.restore(target.hash);
+          console.log(r ? dim(`restored checkpoint ${target.hash} (${target.label})`) : dim("restore failed"));
+          continue;
+        }
+        case "restore": {
+          if (!rest[0]) { console.log(dim("usage: /restore <hash> (see /checkpoints)")); continue; }
+          const r = cp.restore(rest[0]);
+          console.log(r ? dim(`restored checkpoint ${rest[0]}`) : dim("restore failed — check the hash"));
+          continue;
+        }
+        case "checkpoints": {
+          const cps = cp.list();
+          if (!cps.length) { console.log(dim(cp.available() ? "no checkpoints yet (created after mutating turns)" : "checkpoints unavailable (light profile, disabled, or git missing)")); continue; }
+          cps.forEach((c, i) => console.log(`${i === 0 ? cyan("▸") : " "} ${c.hash} ${dim(c.label)}`));
+          continue;
+        }
+        case "diff": {
+          const n = Number(rest[0]) || 1;
+          console.log(cp.diff(n));
+          continue;
+        }
+        case "worktree": {
+          const sub = rest[0];
+          const gitOk = Bun.spawnSync(["git", "-C", originalCwd, "rev-parse", "--git-dir"], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
+          if (!gitOk) { console.log(dim("not a git repository — worktrees need one")); continue; }
+          if (sub === "list") {
+            const r = Bun.spawnSync(["git", "-C", originalCwd, "worktree", "list"], { stdout: "pipe", stderr: "pipe" });
+            console.log(dim(r.stdout?.toString().trim() || "none"));
+          } else if (sub === "back") {
+            config.cwd = originalCwd;
+            console.log(dim(`cwd → ${originalCwd}`));
+          } else if (sub === "merge") {
+            const slug = rest[1];
+            if (!slug) { console.log(dim("usage: /worktree merge <slug>")); continue; }
+            config.cwd = originalCwd;
+            const m = Bun.spawnSync(["git", "-C", originalCwd, "merge", `ap/${slug}`], { stdout: "pipe", stderr: "pipe" });
+            const out = (m.stdout?.toString() ?? "") + (m.stderr?.toString() ?? "");
+            console.log(dim(out.trim().slice(0, 400) || "merged"));
+            if (m.exitCode === 0) {
+              const dir = join(config.dataDir, "worktrees", `${basename(originalCwd)}-${slug}`);
+              Bun.spawnSync(["git", "-C", originalCwd, "worktree", "remove", "--force", dir], { stdout: "ignore", stderr: "ignore" });
+              console.log(dim(`worktree removed · branch ap/${slug} kept`));
+            }
+          } else if (sub && sub !== "new") {
+            console.log(dim("usage: /worktree <new <slug> | list | back | merge <slug>>"));
+          } else {
+            const slug = (sub === "new" ? rest[1] : rest[0])?.replace(/[^\w-]/g, "-").toLowerCase();
+            if (!slug) { console.log(dim("usage: /worktree new <slug>")); continue; }
+            const dir = join(config.dataDir, "worktrees", `${basename(originalCwd)}-${slug}`);
+            const r = Bun.spawnSync(["git", "-C", originalCwd, "worktree", "add", dir, "-b", `ap/${slug}`], { stdout: "pipe", stderr: "pipe" });
+            if (r.exitCode !== 0) { console.log(dim((r.stderr?.toString() ?? "worktree add failed").trim().slice(0, 300))); continue; }
+            config.cwd = dir;
+            console.log(dim(`worktree ready: branch ap/${slug} · cwd → ${dir}`));
+            console.log(dim(`/worktree back to return · /worktree merge ${slug} when done`));
+          }
+          continue;
+        }
+        case "compact": {
+          if (session.history.length < 4) { console.log(dim("nothing worth compacting yet")); continue; }
+          spinner.start("compacting…");
+          try {
+            const msgs = [
+              { role: "system" as const, content: "Summarize this coding session for a successor agent: goals, decisions, files touched, current state, open items. Be concise but complete. Output only the summary." },
+              ...session.history,
+              { role: "user" as const, content: "Summarize the session now." },
+            ];
+            let summary = "";
+            await streamChat(provider, msgs, [], (d) => { summary += d; }, undefined, undefined, undefined, config.streamIdleSeconds * 1000);
+            spinner.stop();
+            const old = session.id;
+            session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
+            config.sessionId = session.id;
+            sessionAllows = new Set();
+            cp = new Checkpoints(config, session.id);
+            session.append({ role: "user", content: `[Compacted context from session ${old}]\n${summary.trim()}` });
+            session.append({ role: "assistant", content: "Context loaded — continuing from the summary." });
+            console.log(dim(`compacted ${old} → new session ${session.id} (${summary.length} chars of summary)`));
+          } catch (e) {
+            spinner.stop();
+            console.log(dim(`compact failed: ${(e as Error).message}`));
+          }
+          continue;
+        }
         default:
           console.log(dim(`unknown command ${input.split(/\s+/)[0]} — type / to see commands`));
           continue;
       }
+      }
     }
 
     let userText = input;
+
+    // @file mentions: inline referenced files so the model skips a read turn.
+    if (!config.light && /@[\w./\\-]+/.test(userText)) {
+      const attached: string[] = [];
+      for (const m of userText.match(/@([\w./\\-]+)/g) ?? []) {
+        const rel = m.slice(1);
+        const p = resolve(config.cwd, rel);
+        try {
+          if (existsSync(p)) {
+            const body = readFileSync(p, "utf8");
+            if (!body.includes("\0")) {
+              userText += `\n\n<file path="${rel}">\n${body.slice(0, 8000)}${body.length > 8000 ? "\n[truncated]" : ""}\n</file>`;
+              attached.push(rel);
+            }
+          }
+        } catch {}
+      }
+      if (attached.length) process.stdout.write(dim(`[attached: ${attached.join(", ")}]\n`));
+    }
+
     if (planArmed && lastPlan && config.mode === "code") {
       userText += `\n\n<approved_plan>\n${lastPlan}\n</approved_plan>\nIf this message asks to implement the plan above, follow it EXACTLY — every step in order, nothing added, nothing skipped, no improvisation. If a step turns out to be impossible, stop and report instead of deviating.`;
       planArmed = false;
@@ -497,6 +677,7 @@ export async function replMain(flags: CliFlags) {
       return result;
     };
 
+    let turnMutated = false;
     const emit = (e: AgentEvent) => {
       spinner.stop();
       let label: string | undefined;
@@ -506,6 +687,7 @@ export async function replMain(flags: CliFlags) {
       } else if (e.type === "tool_end") {
         label = active.get(e.id) ?? e.name;
         active.delete(e.id);
+        if (!e.error && getTool(e.name)?.readOnly === false) turnMutated = true;
       } else if (e.type === "turn_end") {
         totals.steps++;
         if (e.usage) {
@@ -543,6 +725,11 @@ export async function replMain(flags: CliFlags) {
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       const cached = totals.cached ? ` (${totals.cached} cached)` : "";
       writeBoth(dim(`\n${totals.steps} step${totals.steps === 1 ? "" : "s"} · ↑${totals.prompt}${cached} ↓${totals.completion} · ${secs}s\n`));
+    }
+
+    if (turnMutated && cp.available()) {
+      const hash = cp.commit(input);
+      if (hash) writeBoth(dim(`✓ checkpoint ${hash} · /undo to revert\n`));
     }
 
     if (config.mode === "plan" && finalText.trim()) {
