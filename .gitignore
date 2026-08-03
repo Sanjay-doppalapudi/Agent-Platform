@@ -5,3 +5,6 @@ harness.exe.old*
 dist/
 harness.config.json
 *.log
+ap.exe
+ap.exe.old*
+ap.config.json
