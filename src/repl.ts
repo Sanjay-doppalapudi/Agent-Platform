@@ -315,6 +315,35 @@ export async function replMain(flags: CliFlags) {
     return statusCache.s;
   };
 
+  // Summarize the session into a fresh one (manual /compact + auto-compact).
+  const compactNow = async (): Promise<boolean> => {
+    spinner.start("compacting…");
+    try {
+      const msgs = [
+        { role: "system" as const, content: "Summarize this coding session for a successor agent: goals, decisions, files touched, current state, open items. Be concise but complete. Output only the summary." },
+        ...session.history,
+        { role: "user" as const, content: "Summarize the session now." },
+      ];
+      let summary = "";
+      await streamChat(provider, msgs, [], (d) => { summary += d; }, undefined, undefined, undefined, config.streamIdleSeconds * 1000);
+      spinner.stop();
+      const old = session.id;
+      session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
+      config.sessionId = session.id;
+      sessionAllows = new Set();
+      spend.prompt = spend.cached = spend.completion = 0;
+      cp = new Checkpoints(config, session.id);
+      session.append({ role: "user", content: `[Compacted context from session ${old}]\n${summary.trim()}` });
+      session.append({ role: "assistant", content: "Context loaded — continuing from the summary." });
+      console.log(dim(`compacted ${old} → new session ${session.id} (${summary.length} chars of summary)`));
+      return true;
+    } catch (e) {
+      spinner.stop();
+      console.log(dim(`compact failed: ${(e as Error).message}`));
+      return false;
+    }
+  };
+
   // Sandbox permission state: session-scoped "always allow" keys and a
   // promise chain so parallel tools never show two prompts at once.
   let sessionAllows = new Set<string>();
@@ -687,29 +716,7 @@ export async function replMain(flags: CliFlags) {
         }
         case "compact": {
           if (session.history.length < 4) { console.log(dim("nothing worth compacting yet")); continue; }
-          spinner.start("compacting…");
-          try {
-            const msgs = [
-              { role: "system" as const, content: "Summarize this coding session for a successor agent: goals, decisions, files touched, current state, open items. Be concise but complete. Output only the summary." },
-              ...session.history,
-              { role: "user" as const, content: "Summarize the session now." },
-            ];
-            let summary = "";
-            await streamChat(provider, msgs, [], (d) => { summary += d; }, undefined, undefined, undefined, config.streamIdleSeconds * 1000);
-            spinner.stop();
-            const old = session.id;
-            session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
-            config.sessionId = session.id;
-            sessionAllows = new Set();
-            spend.prompt = spend.cached = spend.completion = 0;
-            cp = new Checkpoints(config, session.id);
-            session.append({ role: "user", content: `[Compacted context from session ${old}]\n${summary.trim()}` });
-            session.append({ role: "assistant", content: "Context loaded — continuing from the summary." });
-            console.log(dim(`compacted ${old} → new session ${session.id} (${summary.length} chars of summary)`));
-          } catch (e) {
-            spinner.stop();
-            console.log(dim(`compact failed: ${(e as Error).message}`));
-          }
+          await compactNow();
           continue;
         }
         default:
@@ -914,6 +921,19 @@ export async function replMain(flags: CliFlags) {
       } else {
         writeBoth(dim(`plan ready · /code to implement it exactly\n`));
       }
+    }
+
+    // Auto-compaction (opencode parity): near the trim budget, summarize into
+    // a fresh session instead of silently eliding old tool results forever.
+    if (!config.light && config.autoCompact !== "off" && session.history.length >= 4) {
+      try {
+        let chars = buildSystemPrompt(config).length;
+        for (const m of session.history) chars += JSON.stringify(m).length;
+        if (chars >= config.contextBudgetChars * 0.85) {
+          console.log(dim(`context ${Math.round((chars / config.contextBudgetChars) * 100)}% of budget — auto-compacting ("autoCompact": "off" disables)`));
+          await compactNow();
+        }
+      } catch {}
     }
   }
 }

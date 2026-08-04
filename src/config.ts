@@ -40,6 +40,8 @@ export interface Config {
   light: boolean;
   /** Shadow-repo checkpoints after mutating turns (off in light profile). */
   checkpoints: "on" | "off";
+  /** REPL auto-compaction at 85% of contextBudgetChars (full profile only). */
+  autoCompact: "on" | "off";
   /** Shell hooks: preBash/preWrite/preEdit (nonzero exit blocks the tool),
    *  afterEdit (nonzero output is fed back to the model to self-fix).
    *  Lifecycle: onDone/onError — a shell command (AP_EVENT/AP_PAYLOAD env)
@@ -85,6 +87,7 @@ const DEFAULTS: Omit<Config, "provider" | "providers" | "cwd"> = {
   bashGuard: "on",
   light: false,
   checkpoints: "on",
+  autoCompact: "on",
   streamIdleSeconds: 90,
   maxIterations: 40,
   contextBudgetChars: 400_000,

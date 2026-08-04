@@ -137,6 +137,7 @@ Project `ap.config.json` (walked up from cwd; legacy `harness.config.json` accep
 | `parallelPolicy` | `"safe"` | read-only tools run parallel, mutations serial (`all`/`none`) |
 | `ignore` | `[]` | extends the hard ignore list (node_modules, .git, dist*, builds, trash, uploads, …) |
 | `checkpoints` | `"on"` | shadow-git checkpoint after every mutating turn (`"off"` disables) |
+| `autoCompact` | `"on"` | REPL auto-summarizes into a fresh session at 85% of the context budget (`"off"` disables; `/compact` stays manual) |
 | `hooks` | — | `preBash`/`preWrite`/`preEdit`/`afterEdit` tool hooks + `onDone`/`onError` lifecycle hooks (command or webhook URL) |
 | `mcpServers` | — | MCP servers, Claude Code format (also read from a project `.mcp.json`) |
 
@@ -159,7 +160,7 @@ Weaker-model tolerance: tool names (`search`→grep, `create`→write, …) and 
 - **Hooks**: config `hooks.preBash/preWrite/preEdit` (nonzero exit blocks the tool with the hook's output) and `hooks.afterEdit` (e.g. `bun x tsc --noEmit` — failures are fed back so the model fixes them itself, max 2 rounds/turn). **Lifecycle hooks**: `hooks.onDone` / `hooks.onError` fire when a turn finishes — either a shell command (JSON payload in `AP_PAYLOAD`, event name in `AP_EVENT`) or an `http(s)://` URL that receives a JSON POST (`{event, sessionId, cwd, text|message}`). Fire-and-forget: they never block or fail the turn (run/loop drain them before exiting so they always deliver). Notify Slack, kick a build, chain another `ap run` — anything that should happen "when the chat finishes".
 - **`websearch` tool**: web search via DuckDuckGo's HTML endpoint (plain fetch, no API key) — titles, URLs, snippets. **`fetch` tool**: URL → readable text (50KB cap); `render:true` runs the page through your *installed* Chrome/Edge headless (`--dump-dom`, ~300ms, nothing bundled) so JS-rendered pages work — falls back to plain fetch if no browser is found. **`todo` tool**: session checklist rendered live in the transcript.
 - **`/worktree new <slug> | list | back | merge <slug>`**: isolated git worktree + `ap/<slug>` branch per task — parallel work never collides.
-- **`/compact`**: summarizes the session into a fresh one when context grows.
+- **`/compact`**: summarizes the session into a fresh one — and runs **automatically at 85% of the context budget** (`autoCompact: "off"` disables), so long sessions never degrade into silently-elided history.
 - **`AGENTS.md`** project notes supported alongside `AP.md`/`HARNESS.md`; `ap resume` (interactive picker) and `ap sessions search <q>` (ripgrep over transcripts).
 
 ## Loop mode — run until verifiably done
