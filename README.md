@@ -178,6 +178,31 @@ ap skills remove <name>
 
 The installer is zero-dep: GitHub tree API + raw downloads — no git, no npx. `/skills` lists them in the REPL. Skills are a full-profile feature; `--light` never injects them.
 
+## MCP — the existing plug-in ecosystem, unchanged
+
+AP is an [MCP](https://modelcontextprotocol.io) client, so any of the thousands of existing MCP servers (GitHub, Postgres, Slack, browsers, …) plug straight in — their tools appear to the model automatically as `mcp_<server>_<tool>`. Zero dependencies here too: MCP is just JSON-RPC 2.0, spoken over **stdio** (`Bun.spawn`, newline-delimited) or **Streamable HTTP** (plain `fetch`).
+
+Config is the **same JSON as Claude Code** — paste a server's install snippet and it works. Either a `.mcp.json` in the project root or an `mcpServers` block in `ap.config.json` / `<dataDir>/config.json`:
+
+```jsonc
+{
+  "mcpServers": {
+    "filesystem": { "command": "bun", "args": ["x", "@modelcontextprotocol/server-filesystem", "."] },
+    "remote":     { "url": "https://example.com/mcp", "headers": { "authorization": "Bearer …" } }
+  }
+}
+```
+
+```sh
+ap mcp                                  # list servers, status, tools (exit 1 if any down — CI-friendly)
+ap mcp call <server> <tool> '<json>'    # call one tool directly, no LLM (testing)
+ap mcp add fs bun x @modelcontextprotocol/server-filesystem .   # add to global config
+ap mcp add <name> --url <url> [--project]                       # HTTP server / write .mcp.json
+ap mcp remove <name>
+```
+
+Engineering notes: servers connect **lazily before the first turn** (never on the startup path — startup stays ~50ms), the tool list is **frozen per process in a fixed order** so the request's schema bytes stay stable and provider prefix caching keeps hitting, a dead server degrades to a one-line warning (never a crash), tool results are capped at 40KB, and tools annotated `readOnlyHint` work in plan mode and run in parallel. Models that misname tools are tolerated (`server.tool`, `server__tool`, bare `tool` all resolve). MCP is a full-profile feature; `--light` never connects. `/mcp` lists servers in the REPL.
+
 ## Sessions (no database)
 
 Each session is one append-only JSONL file in `<dataDir>/sessions/<id>.jsonl` — a `meta` line, then one line per message, flushed on every append. Crash-safe (torn last line ignored), resumable (`-c`, `--resume <id>`, `/resume`), greppable, and deleted by deleting the file.

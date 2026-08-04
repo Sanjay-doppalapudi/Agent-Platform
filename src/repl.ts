@@ -4,6 +4,7 @@ import { emitKeypressEvents } from "node:readline";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { loadConfig, resolveProvider } from "./config.ts";
+import { initMcp } from "./mcp.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
 import { Checkpoints } from "./checkpoint.ts";
 import { streamChat } from "./provider.ts";
@@ -67,6 +68,7 @@ const COMMANDS: SlashCommand[] = [
   { name: "/sandbox", desc: "show or toggle the write-sandbox", hasArg: true },
   { name: "/agents", desc: "list subagents spawned this session" },
   { name: "/skills", desc: "list available SKILL.md packs" },
+  { name: "/mcp", desc: "list MCP servers and their tools" },
   { name: "/undo", desc: "restore the previous checkpoint" },
   { name: "/diff", desc: "diff of the last checkpoint (+pending)", hasArg: true },
   { name: "/checkpoints", desc: "list workspace checkpoints" },
@@ -246,6 +248,10 @@ export async function replMain(flags: CliFlags) {
 
   let cp = new Checkpoints(config, session.id);
   const originalCwd = config.cwd;
+
+  // MCP servers connect in the background while the user types; the promise
+  // is awaited before the first turn so the tool list is complete + frozen.
+  const mcpReady = initMcp(config, (m) => console.log(yellow(`⚠ ${m}`)));
 
   // Custom slash commands: .ap/commands/<name>.md in the repo or data dir.
   const customCommands = new Map<string, { file: string; desc: string }>();
@@ -520,6 +526,27 @@ export async function replMain(flags: CliFlags) {
           if (config.light) console.log(dim("(--light profile: skills are not injected into the prompt)"));
           continue;
         }
+        case "mcp": {
+          const { mcpStatus, mcpServerSpecs } = await import("./mcp.ts");
+          await mcpReady;
+          const st = mcpStatus();
+          if (!st.length) {
+            const configured = Object.keys(mcpServerSpecs(config)).length;
+            console.log(dim(configured
+              ? "MCP servers configured but not connected (light profile?)"
+              : "no MCP servers — add with: ap mcp add <name> <command...> (or a project .mcp.json)"));
+            continue;
+          }
+          for (const s of st) {
+            const mark = s.ok ? green("●") : red("●");
+            const meta = s.ok ? dim(` · ${s.tools.length} tools`) : ` ${red(s.error ?? "failed")}`;
+            console.log(`${mark} ${cyan(s.name)} ${dim(`[${s.transport}]`)}${s.serverName ? dim(` ${s.serverName}`) : ""}${meta}`);
+            for (const t of s.tools) {
+              console.log(dim(`   ${t.canonical}${t.readOnly ? " (ro)" : ""} — ${t.description.replace(/\s+/g, " ").slice(0, 70)}`));
+            }
+          }
+          continue;
+        }
         case "undo": {
           const cps = cp.list(2);
           if (cps.length < 2) { console.log(dim("no earlier checkpoint to restore")); continue; }
@@ -737,6 +764,7 @@ export async function replMain(flags: CliFlags) {
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     let finalText = "";
     try {
+      await mcpReady; // no-op after the first turn
       finalText = await runTurn(config, provider, session, userText, emit, ctrl.signal, { permit });
     } catch {
       // error already emitted

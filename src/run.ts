@@ -3,6 +3,7 @@
 import { loadConfig, resolveProvider } from "./config.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
 import { Checkpoints } from "./checkpoint.ts";
+import { initMcp } from "./mcp.ts";
 import { getTool } from "./tools/index.ts";
 import { MdRenderer } from "./md.ts";
 import { renderDiff, toolLabel, toolSummary } from "./ui.ts";
@@ -77,6 +78,8 @@ export async function runMain(flags: CliFlags) {
 
   const ctrl = new AbortController();
   process.on("SIGINT", () => ctrl.abort());
+
+  await initMcp(config, (m) => process.stderr.write(`\x1b[33m⚠ ${m}\x1b[0m\n`));
 
   try {
     await runTurn(config, provider, session, flags.prompt, emit, ctrl.signal, {

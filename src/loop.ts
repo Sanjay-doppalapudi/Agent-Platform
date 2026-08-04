@@ -15,6 +15,7 @@
 //     into a fresh one (goal + progress), so the loop can run indefinitely
 //   - checkpoint per mutating iteration → /undo-able audit trail
 import { loadConfig, resolveProvider } from "./config.ts";
+import { initMcp } from "./mcp.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
 import { Checkpoints } from "./checkpoint.ts";
 import { getTool } from "./tools/index.ts";
@@ -49,6 +50,8 @@ export async function loopMain(flags: CliFlags) {
 
   const ctrl = new AbortController();
   process.on("SIGINT", () => ctrl.abort());
+
+  await initMcp(config, (m) => process.stderr.write(`\x1b[33m⚠ ${m}\x1b[0m\n`));
 
   // --- rendering (same contract as run mode; loop meta-lines on stderr) ----
   const md = !json && process.stdout.isTTY ? new MdRenderer() : null;

@@ -16,6 +16,18 @@ export interface ProviderEntry {
   headers?: Record<string, string>;
 }
 
+/** One MCP server: stdio ({command, args, env}) or Streamable HTTP ({url,
+ *  headers}). Same JSON shape as Claude Code's .mcp.json entries. */
+export interface McpServerSpec {
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  headers?: Record<string, string>;
+  /** "stdio" | "http" — informational; the transport is inferred. */
+  type?: string;
+}
+
 export interface Config {
   provider: string;
   providers: Record<string, ProviderEntry>;
@@ -31,6 +43,9 @@ export interface Config {
   /** Shell hooks: preBash/preWrite/preEdit (nonzero exit blocks the tool),
    *  afterEdit (nonzero output is fed back to the model to self-fix). */
   hooks?: Record<string, string>;
+  /** MCP servers (name → spec) — merged with a project .mcp.json. Full
+   *  profile only; connected lazily before the first turn, never at startup. */
+  mcpServers?: Record<string, McpServerSpec>;
   streamIdleSeconds: number;
   maxIterations: number;
   contextBudgetChars: number;

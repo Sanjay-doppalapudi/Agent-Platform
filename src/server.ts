@@ -9,6 +9,7 @@
 //   GET  /session/:id/messages                  → Msg[]
 //   DELETE /session/:id
 import { loadConfig, resolveProvider } from "./config.ts";
+import { initMcp } from "./mcp.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
 import { Session } from "./session.ts";
 import type { CliFlags } from "./index.ts";
@@ -25,6 +26,10 @@ export async function serveMain(flags: CliFlags) {
   const baseConfig = loadConfig(flags);
   const provider = resolveProvider(baseConfig, flags);
   const port = flags.port ?? 4141;
+
+  // MCP binds to the server's base cwd once per process; per-session cwds
+  // share the same tool set (schema stability across all sessions).
+  await initMcp(baseConfig, (m) => console.error(`⚠ ${m}`));
 
   const sessions = new Map<string, Live>();
   type Subscriber = { sessionId: string | null; write: (e: AgentEvent & { sessionId: string }) => void };

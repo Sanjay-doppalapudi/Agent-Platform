@@ -117,6 +117,29 @@ const HELP_TOPICS: Record<string, string> = {
 
   Zero-dep installer: GitHub tree API + raw downloads — no git, no npx.`,
 
+  mcp: `ap mcp — Model Context Protocol servers (the open plug-in standard)
+
+  Any existing MCP server (GitHub, Postgres, Slack, browsers, …) plugs into
+  AP: its tools appear to the model automatically as mcp_<server>_<tool>.
+  Servers connect lazily before the first turn; a dead server degrades to a
+  warning. Tools with readOnlyHint also work in plan mode. Not in --light.
+
+  Config — same JSON as Claude Code, in either place (paste and go):
+    .mcp.json in the project root:            {"mcpServers": {"name": {…}}}
+    mcpServers block in ap.config.json or <dataDir>/config.json
+  stdio: {"command": "bun", "args": ["x", "@modelcontextprotocol/server-filesystem", "."]}
+  http:  {"url": "https://example.com/mcp", "headers": {"authorization": "Bearer …"}}
+
+  ap mcp                                 list servers, status, tools (exit 1 if any down)
+  ap mcp call <server> <tool> '<json>'   call one tool directly, no LLM (testing)
+  ap mcp add <name> <command> [args...]  add a stdio server to <dataDir>/config.json
+  ap mcp add <name> --url <url>          add a Streamable HTTP server
+  ap mcp add ... --project               write to .mcp.json in this project instead
+  ap mcp remove <name>                   remove from either config file
+
+  If a server command needs flags that collide with ap's own (-m, --port, …),
+  add the entry to the JSON file directly instead of via "ap mcp add".`,
+
   serve: `ap serve [--port 4141] — HTTP server mode
 
   POST /session {cwd?}                    → {id}
@@ -144,6 +167,7 @@ Usage:
   ap loop -p "goal"        loop work→verify until the goal is verifiably done
   ap serve [--port 4141]   HTTP server mode (sessions + SSE)
   ap skills [add|remove]   list/install SKILL.md packs (skills.sh compatible)
+  ap mcp [add|call|...]    connect MCP servers — their tools become agent tools
   ap models [query]        search the models.dev catalog (context + prices)
   ap auth <provider>       store an API key (hidden input, user-locked file)
   ap resume                pick a recent session to resume
@@ -250,6 +274,111 @@ switch (cmd) {
       break;
     }
     console.error(`usage: ap skills | ap skills add <owner>/<repo> [--skill name] | ap skills remove <name>`);
+    process.exit(1);
+    break;
+  }
+  case "mcp": {
+    const { loadConfig } = await import("./config.ts");
+    const config = loadConfig(flags);
+    const { initMcp, mcpStatus, mcpServerSpecs } = await import("./mcp.ts");
+    const warn = (m: string) => console.error(`⚠ ${m}`);
+    const sub = rest[0];
+
+    if (!sub || sub === "list") {
+      const specs = mcpServerSpecs(config);
+      if (!Object.keys(specs).length) {
+        console.log(`no MCP servers configured.
+Add one:  ap mcp add <name> <command> [args...]   (stdio server)
+          ap mcp add <name> --url <https://...>   (Streamable HTTP server)
+Or drop a Claude-Code-format .mcp.json in the project root — works as-is.
+Example:  ap mcp add fs bun x @modelcontextprotocol/server-filesystem .`);
+        break;
+      }
+      await initMcp(config, warn);
+      let anyFailed = false;
+      for (const s of mcpStatus()) {
+        if (!s.ok) anyFailed = true;
+        const head = `${s.ok ? "✓" : "✗"} ${s.name}  [${s.transport}]${s.serverName ? `  ${s.serverName}` : ""}`;
+        console.log(s.ok ? `${head}  ·  ${s.tools.length} tools` : `${head}  ·  ${s.error}`);
+        for (const t of s.tools) {
+          console.log(`    ${t.canonical}${t.readOnly ? "  (read-only)" : ""}  ${t.description.replace(/\s+/g, " ").slice(0, 80)}`);
+        }
+      }
+      process.exit(anyFailed ? 1 : 0);
+    }
+
+    if (sub === "call" && rest[1] && rest[2]) {
+      await initMcp(config, warn);
+      const { execTool } = await import("./tools/index.ts");
+      const start = performance.now();
+      const { output, error } = await execTool(`${rest[1]}.${rest[2]}`, rest[3] ?? "{}", {
+        cwd: config.cwd,
+        signal: new AbortController().signal,
+        config,
+        permit: async () => true, // developer typed the exact args — trusted
+        warn,
+      });
+      console.log(output);
+      console.error(`[${rest[1]}/${rest[2]} ${error ? "error" : "ok"} in ${Math.round(performance.now() - start)}ms]`);
+      process.exit(error ? 1 : 0);
+    }
+
+    if (sub === "add" && rest[1]) {
+      const name = rest[1]!;
+      let url: string | undefined;
+      let project = false;
+      const cmdParts: string[] = [];
+      for (let i = 2; i < rest.length; i++) {
+        if (rest[i] === "--url") url = rest[++i];
+        else if (rest[i] === "--project") project = true;
+        else cmdParts.push(rest[i]!);
+      }
+      const spec = url
+        ? { url }
+        : cmdParts.length
+          ? { command: cmdParts[0]!, ...(cmdParts.length > 1 ? { args: cmdParts.slice(1) } : {}) }
+          : null;
+      if (!spec) {
+        console.error(`usage: ap mcp add <name> <command> [args...] | ap mcp add <name> --url <url>  [--project]`);
+        process.exit(1);
+      }
+      const { existsSync, readFileSync, writeFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      const file = project ? join(config.cwd, ".mcp.json") : join(config.dataDir, "config.json");
+      let cur: any = {};
+      if (existsSync(file)) {
+        try { cur = JSON.parse(readFileSync(file, "utf8")); } catch {
+          console.error(`refusing to overwrite unparseable ${file} — fix it first`);
+          process.exit(1);
+        }
+      }
+      cur.mcpServers = { ...cur.mcpServers, [name]: spec };
+      writeFileSync(file, JSON.stringify(cur, null, 2) + "\n");
+      console.log(`added mcp server "${name}" → ${file}\nverify with: ap mcp list`);
+      break;
+    }
+
+    if (sub === "remove" && rest[1]) {
+      const { existsSync, readFileSync, writeFileSync } = await import("node:fs");
+      const { join } = await import("node:path");
+      let removed = false;
+      for (const file of [join(config.cwd, ".mcp.json"), join(config.dataDir, "config.json")]) {
+        if (!existsSync(file)) continue;
+        try {
+          const cur = JSON.parse(readFileSync(file, "utf8"));
+          if (cur.mcpServers?.[rest[1]!]) {
+            delete cur.mcpServers[rest[1]!];
+            writeFileSync(file, JSON.stringify(cur, null, 2) + "\n");
+            console.log(`removed "${rest[1]}" from ${file}`);
+            removed = true;
+          }
+        } catch {}
+      }
+      if (!removed) { console.error(`server "${rest[1]}" not found in .mcp.json or ${config.dataDir}\\config.json`); process.exit(1); }
+      break;
+    }
+
+    console.error(`usage: ap mcp [list] | ap mcp call <server> <tool> '<json>' | ap mcp add <name> <command...> [--url u] [--project] | ap mcp remove <name>`);
     process.exit(1);
     break;
   }

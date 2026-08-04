@@ -202,6 +202,25 @@ export const TOOLS: ToolDef[] = [
 
 const byName = new Map(TOOLS.map((t) => [t.name, t]));
 
+// Dynamic tools (MCP servers) — registered ONCE per process by mcp.ts before
+// the first turn, then frozen: their schemas append after the built-ins in a
+// fixed order, so the request's tool list stays byte-stable for the whole
+// session and provider prefix caching still hits. Never present in --light.
+const dynamicTools = new Map<string, ToolDef>();
+const dynamicAliases = new Map<string, string>();
+let dynamicSchemasCode: ToolSchema[] = [];
+let dynamicSchemasPlan: ToolSchema[] = [];
+
+export function registerDynamicTools(defs: ToolDef[], aliases: Record<string, string>) {
+  for (const d of defs) dynamicTools.set(d.name, d);
+  for (const [a, c] of Object.entries(aliases)) {
+    if (!byName.has(a) && !dynamicAliases.has(a)) dynamicAliases.set(a, c);
+  }
+  const all = [...dynamicTools.values()];
+  dynamicSchemasCode = all.map(toSchema);
+  dynamicSchemasPlan = all.filter((t) => t.readOnly).map(toSchema);
+}
+
 // Weaker models invent tool names — map the common guesses to real tools.
 const NAME_ALIASES: Record<string, string> = {
   search: "grep", rg: "grep",
@@ -217,7 +236,9 @@ const NAME_ALIASES: Record<string, string> = {
 /** Canonical tool name for a model-supplied name (exact wins; alias next). */
 export function resolveToolName(name: string): string {
   if (byName.has(name)) return name;
-  return NAME_ALIASES[name] ?? name;
+  if (NAME_ALIASES[name]) return NAME_ALIASES[name];
+  if (dynamicTools.has(name)) return name;
+  return dynamicAliases.get(name) ?? name;
 }
 
 // …and misname arguments. Map aliases onto canonical names (only when absent).
@@ -271,7 +292,7 @@ function parseArgsLenient(raw: string): any {
 }
 
 export function getTool(name: string): ToolDef | undefined {
-  return byName.get(name);
+  return byName.get(name) ?? dynamicTools.get(name);
 }
 
 const toSchema = (t: ToolDef): ToolSchema => ({
@@ -290,12 +311,15 @@ export const TOOL_SCHEMAS = FULL_CODE; // back-compat export
 
 export function toolSchemasFor(config: Config): ToolSchema[] {
   if (config.light) return config.mode === "plan" ? LIGHT_PLAN : LIGHT_CODE;
-  return config.mode === "plan" ? FULL_PLAN : FULL_CODE;
+  if (config.mode === "plan") {
+    return dynamicSchemasPlan.length ? [...FULL_PLAN, ...dynamicSchemasPlan] : FULL_PLAN;
+  }
+  return dynamicSchemasCode.length ? [...FULL_CODE, ...dynamicSchemasCode] : FULL_CODE;
 }
 
 /** Safe to run concurrently (read-only tools + explicitly parallel-safe ones). */
 export function isParallelSafe(name: string): boolean {
-  const t = byName.get(resolveToolName(name));
+  const t = getTool(resolveToolName(name));
   return !!t && (t.parallelSafe ?? t.readOnly);
 }
 
@@ -306,7 +330,7 @@ export async function execTool(
   ctx: ToolCtx,
 ): Promise<{ output: string; error: boolean }> {
   const canonical = resolveToolName(name);
-  const tool = byName.get(canonical);
+  const tool = getTool(canonical);
   if (!tool) {
     return { output: `unknown tool: ${name} — available tools: read, write, edit, bash, glob, grep`, error: true };
   }

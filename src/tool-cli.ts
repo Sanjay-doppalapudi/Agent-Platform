@@ -1,6 +1,6 @@
 // `ap tool <name> '<json>'` — direct tool tester.
 import { loadConfig } from "./config.ts";
-import { execTool } from "./tools/index.ts";
+import { execTool, getTool, resolveToolName } from "./tools/index.ts";
 import type { CliFlags } from "./index.ts";
 
 export async function toolMain(flags: CliFlags, rest: string[]) {
@@ -10,6 +10,11 @@ export async function toolMain(flags: CliFlags, rest: string[]) {
     process.exit(1);
   }
   const config = loadConfig(flags);
+  if (!getTool(resolveToolName(name))) {
+    // Not a built-in — it may live on an MCP server; connect and retry.
+    const { initMcp } = await import("./mcp.ts");
+    await initMcp(config, (m) => console.error(`⚠ ${m}`));
+  }
   const start = performance.now();
   const { output, error } = await execTool(name, json ?? "{}", {
     cwd: config.cwd,
