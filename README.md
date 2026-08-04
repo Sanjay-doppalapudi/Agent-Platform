@@ -98,7 +98,7 @@ Type `/` to open the command menu (↑/↓ navigate, Enter/Tab select, Esc close
 | `/system` `/context` | inspect the system prompt / token usage |
 | `/exit` | quit (prints the session id + resume command) |
 
-**Ctrl+O** toggles details (reasoning + diffs). While off, details are buffered (60KB cap) and replayed when you toggle back on. **Ctrl+C** aborts the running turn; at an empty prompt it exits.
+**Ctrl+O** toggles details (reasoning + subagent progress); diffs always show — a file never changes without the diff having been visible. While off, details are buffered and replayed when you toggle back on. **Ctrl+C** aborts the running turn; at an empty prompt it exits. The spinner shows live elapsed time and output tokens (`⠹ thinking · 12s · ~340 tok`), the per-turn stats line includes context usage (`ctx 42%`, with a `/compact` reminder at 60%), and errors come with a suggested fix (`fix: ap auth <provider>`). First-time moments teach their command: the first sandbox prompt points at `/sandbox`, the first subagent at `/agents`.
 
 Every edit/write renders a diff before it runs, built from the tool args (no extra I/O):
 

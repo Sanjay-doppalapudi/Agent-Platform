@@ -14,7 +14,7 @@ import { listSubagents } from "./tools/agent.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import { readLine, type SlashCommand } from "./input.ts";
 import { MdRenderer } from "./md.ts";
-import { renderDiff, toolLabel, toolSummary } from "./ui.ts";
+import { errorHint, renderDiff, toolLabel, toolSummary } from "./ui.ts";
 import { Session } from "./session.ts";
 import type { Usage } from "./stream.ts";
 import type { CliFlags } from "./index.ts";
@@ -80,7 +80,9 @@ const COMMANDS: SlashCommand[] = [
   { name: "/exit", desc: "quit" },
 ];
 
-function makeSpinner() {
+/** `extra` is appended to every frame — live elapsed/token state answers
+ * "is it stuck?" with zero extra renders (the interval is already firing). */
+function makeSpinner(extra?: () => string) {
   const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let timer: ReturnType<typeof setInterval> | null = null;
   let i = 0;
@@ -90,7 +92,7 @@ function makeSpinner() {
       label = newLabel;
       if (timer || !process.stdout.isTTY) return;
       timer = setInterval(() => {
-        process.stdout.write(`\r${dim(`${frames[i++ % frames.length]} ${label}`)}\x1b[K`);
+        process.stdout.write(`\r${dim(`${frames[i++ % frames.length]} ${label}${extra?.() ?? ""}`)}\x1b[K`);
       }, 80);
     },
     stop() {
@@ -108,8 +110,10 @@ const PLAN_GIST_LINES = 30;
 
 /**
  * Renders AgentEvents to a string. Two instances run in parallel per turn —
- * one including details (reasoning + diffs), one without — so ctrl+o can
- * re-render the whole turn in either form at any moment.
+ * one including details (reasoning + subagent lines), one without — so ctrl+o
+ * can re-render the whole turn in either form at any moment. Diffs show in
+ * BOTH forms: they are decisions, not narration — a file must never change
+ * without the diff having been visible.
  */
 class TurnRenderer {
   private md = new MdRenderer();
@@ -157,7 +161,7 @@ class TurnRenderer {
       }
       case "tool_start": {
         let out = this.endSegment();
-        if (this.details && !this.planMode) {
+        if (!this.planMode) {
           const diff = renderDiff(e.name, e.args);
           if (diff) out += barify(diff);
         }
@@ -180,8 +184,10 @@ class TurnRenderer {
         return this.details ? `${this.endSegment()}${BAR}${dim(`  ${e.text}`)}\n` : "";
       case "warn":
         return `${this.endSegment()}${BAR}${yellow(`⚠ ${e.message}`)}\n`;
-      case "error":
-        return `\n${dim("error:")} ${e.message}\n`;
+      case "error": {
+        const hint = errorHint(e.message);
+        return `\n${dim("error:")} ${e.message}${hint ? `\n${dim(hint)}` : ""}\n`;
+      }
       default:
         return "";
     }
@@ -201,7 +207,28 @@ class TurnRenderer {
 
 export async function replMain(flags: CliFlags) {
   const config = loadConfig(flags);
-  let provider = resolveProvider(config, flags);
+  let provider: ReturnType<typeof resolveProvider>;
+  try {
+    provider = resolveProvider(config, flags);
+  } catch (e) {
+    if (Object.keys(config.providers).length || flags.baseUrl) throw e;
+    // First run, nothing configured — a guided path beats a raw error.
+    console.log(`${cyan("◆")} ${bold("AP")} — no provider configured yet. Two-minute setup:
+
+  ${bold("1.")} Create ${cyan("ap.config.json")} in this project (or ~/.ap/config.json):
+       ${dim(`{
+         "provider": "openrouter",
+         "providers": {
+           "openrouter": { "baseUrl": "https://openrouter.ai/api/v1", "model": "anthropic/claude-sonnet-4.5" }
+         }
+       }`)}
+  ${bold("2.")} Store your API key:   ${cyan("ap auth openrouter")}
+  ${bold("3.")} Run:                  ${cyan("ap")}
+
+  ${dim("Any OpenAI-compatible endpoint also works with zero config:")}
+       ${cyan("ap --base-url <url> --api-key <key> -m <model>")}`);
+    process.exit(1);
+  }
 
   let session: Session;
   if (flags.resume) {
@@ -238,8 +265,17 @@ export async function replMain(flags: CliFlags) {
   let verbose = true;
   let lastPlan: string | null = null;
   let planArmed = false;
-  const spinner = makeSpinner();
+  // Live turn state for the spinner: elapsed seconds + rough output tokens.
+  let turnT0 = 0;
+  let turnOut = 0;
+  const spinner = makeSpinner(() => {
+    if (!turnT0) return "";
+    const s = Math.floor((performance.now() - turnT0) / 1000);
+    return `${s >= 1 ? ` · ${s}s` : ""}${turnOut ? ` · ~${Math.round(turnOut / 4)} tok` : ""}`;
+  });
   const history: string[] = [];
+  // One-time contextual hints: teach a feature the first time it matters.
+  const hinted = new Set<string>();
 
   // Sandbox permission state: session-scoped "always allow" keys and a
   // promise chain so parallel tools never show two prompts at once.
@@ -677,6 +713,8 @@ export async function replMain(flags: CliFlags) {
     const active = new Map<string, string>();
     const totals = { prompt: 0, cached: 0, completion: 0, steps: 0 };
     const t0 = performance.now();
+    turnT0 = t0;
+    turnOut = 0;
 
     const spinnerLabel = () =>
       active.size === 0 ? "thinking" :
@@ -715,7 +753,9 @@ export async function replMain(flags: CliFlags) {
         if (ctrl?.signal.aborted) return false;
         if (sessionAllows.has(key)) return true;
         spinner.stop();
-        writeBoth(`${BAR}${yellow("?")} ${req.action}: ${req.detail} ${dim("— allow? [y/N/a=always]")} `);
+        const sbHint = hinted.has("sandbox") ? "" : dim(" · /sandbox shows the rules");
+        hinted.add("sandbox");
+        writeBoth(`${BAR}${yellow("?")} ${req.action}: ${req.detail} ${dim("— allow? [y/N/a=always]")}${sbHint} `);
         const ans = await readPermitKey();
         writeBoth(dim(ans === "a" ? "always\n" : ans === "y" ? "yes\n" : "no\n"));
         if (ans === "a") { sessionAllows.add(key); return true; }
@@ -728,6 +768,7 @@ export async function replMain(flags: CliFlags) {
     let turnMutated = false;
     const emit = (e: AgentEvent) => {
       spinner.stop();
+      if (e.type === "text" || e.type === "reasoning") turnOut += e.delta.length;
       let label: string | undefined;
       if (e.type === "tool_start") {
         label = toolLabel(e.name, e.args);
@@ -756,6 +797,11 @@ export async function replMain(flags: CliFlags) {
         printedBuf += live;
       }
 
+      if (e.type === "tool_end" && !e.error && e.name === "agent" && !hinted.has("agents")) {
+        hinted.add("agents");
+        writeBoth(`${BAR}${dim("  /agents lists this session's subagents")}\n`);
+      }
+
       if (e.type === "tool_start" || e.type === "tool_end") spinner.start(spinnerLabel());
       else if (e.type === "text" && planMode && fullR.planTruncated) spinner.start("writing plan…");
     };
@@ -771,9 +817,22 @@ export async function replMain(flags: CliFlags) {
     } finally {
       spinner.stop();
       ctrl = null;
+      turnT0 = 0;
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       const cached = totals.cached ? ` (${totals.cached} cached)` : "";
-      writeBoth(dim(`\n${totals.steps} step${totals.steps === 1 ? "" : "s"} · ↑${totals.prompt}${cached} ↓${totals.completion} · ${secs}s\n`));
+      // Context drift belongs on the line people already read after each turn.
+      let ctxNote = "";
+      try {
+        let chars = buildSystemPrompt(config).length;
+        for (const m of session.history) chars += JSON.stringify(m).length;
+        const pct = Math.round((chars / config.contextBudgetChars) * 100);
+        if (pct >= 1) ctxNote = ` · ctx ${pct}%`;
+        if (pct >= 60 && !hinted.has("compact")) {
+          hinted.add("compact");
+          ctxNote += " — /compact frees context";
+        }
+      } catch {}
+      writeBoth(dim(`\n${totals.steps} step${totals.steps === 1 ? "" : "s"} · ↑${totals.prompt}${cached} ↓${totals.completion} · ${secs}s${ctxNote}\n`));
     }
 
     if (turnMutated && cp.available()) {

@@ -92,16 +92,20 @@ export function readLine(opts: {
           .map((f) => ({ label: f, desc: "", insert: `@${f} `, submit: false }));
         return items.length ? { start: buf.length - fm[0].length, items } : null;
       }
-      // Command menu: buffer IS a leading /token.
+      // Command menu: buffer IS a leading /token. Prefix matches rank first,
+      // substring matches follow — /und and /do both find /undo.
       if (buf.startsWith("/") && !buf.includes(" ")) {
-        const items = commands
-          .filter((c) => c.name.startsWith(buf))
-          .map((c) => ({
-            label: `${c.name}${c.hasArg ? " <…>" : ""}`,
-            desc: c.desc,
-            insert: c.hasArg ? `${c.name} ` : c.name,
-            submit: !c.hasArg,
-          }));
+        const q = buf.slice(1).toLowerCase();
+        const starts = commands.filter((c) => c.name.slice(1).toLowerCase().startsWith(q));
+        const contains = q
+          ? commands.filter((c) => !starts.includes(c) && c.name.slice(1).toLowerCase().includes(q))
+          : [];
+        const items = [...starts, ...contains].map((c) => ({
+          label: `${c.name}${c.hasArg ? " <…>" : ""}`,
+          desc: c.desc,
+          insert: c.hasArg ? `${c.name} ` : c.name,
+          submit: !c.hasArg,
+        }));
         return items.length ? { start: 0, items } : null;
       }
       return null;
@@ -126,6 +130,7 @@ export function readLine(opts: {
           rows++;
         }
         if (end < items.length) { out += `\n${DIM}  ↓ ${items.length - end} more${R}`; rows++; }
+        out += `\n${DIM}  ↑↓ move · Tab complete · Enter run · Esc close${R}`; rows++;
         out += `\x1b[${rows}A\r\x1b[${promptLen + buf.length}C`;
       }
       process.stdout.write(out);

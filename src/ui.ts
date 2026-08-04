@@ -61,6 +61,25 @@ function capLines(lines: string[], max: number): { shown: string[]; hidden: numb
   return { shown: lines.slice(0, max), hidden: lines.length - max };
 }
 
+// Common provider failures → a suggested next action. Errors are where
+// intuition dies; one dim "fix:" line revives it. First match wins.
+const ERROR_HINTS: [RegExp, string][] = [
+  [/no api key/i, "fix: ap auth <provider>"],
+  // Model errors first: some providers wrap them in a 401/403 status.
+  [/model\b.*(not (found|supported|available)|does not exist|unknown|invalid)/i, "fix: /models <query> to find a valid id, then /model <provider>/<model>"],
+  [/\b401\b|unauthorized|invalid[_ ]?api[_ ]?key|incorrect api key/i, "fix: the key is missing or wrong — ap auth <provider>"],
+  [/\b403\b|forbidden/i, "fix: this key can't use that model — /models <query> to find one it can"],
+  [/\b429\b|rate[- ]?limit|quota/i, "note: rate-limited — retries are automatic; a cheaper model (-m) also helps"],
+  [/\b50[234]\b|overloaded|unavailable/i, "note: provider-side outage — usually brief; /model switches providers"],
+  [/idle|stall|timed? ?out/i, "note: the stream stalled — one retry is automatic; check network or /model"],
+];
+
+/** Suggested next action for a provider/tool error message, or null. */
+export function errorHint(message: string): string | null {
+  for (const [re, hint] of ERROR_HINTS) if (re.test(message)) return hint;
+  return null;
+}
+
 /**
  * Diff block for edit/write, rendered from the tool args (no file reads).
  * For edit: common leading/trailing lines between old and new are trimmed so

@@ -6,7 +6,7 @@ import { Checkpoints } from "./checkpoint.ts";
 import { initMcp } from "./mcp.ts";
 import { getTool } from "./tools/index.ts";
 import { MdRenderer } from "./md.ts";
-import { renderDiff, toolLabel, toolSummary } from "./ui.ts";
+import { errorHint, renderDiff, toolLabel, toolSummary } from "./ui.ts";
 import { Session } from "./session.ts";
 import type { CliFlags } from "./index.ts";
 
@@ -70,9 +70,12 @@ export async function runMain(flags: CliFlags) {
         process.stderr.write(`${e.error ? "✗" : "✓"} ${label} · ${toolSummary(e.name, e.output, e.error)} · ${e.ms}ms\n`);
         break;
       }
-      case "error":
+      case "error": {
         process.stderr.write(`error: ${e.message}\n`);
+        const hint = errorHint(e.message);
+        if (hint) process.stderr.write(`\x1b[2m${hint}\x1b[0m\n`);
         break;
+      }
     }
   };
 
