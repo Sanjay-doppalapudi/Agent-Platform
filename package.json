@@ -33,7 +33,8 @@
     "ap.config.example.json",
     "README.md",
     "LICENSE",
-    "SECURITY.md"
+    "SECURITY.md",
+    "CREDITS.md"
   ],
   "engines": {
     "bun": ">=1.2.0"

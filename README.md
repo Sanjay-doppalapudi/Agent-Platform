@@ -167,6 +167,7 @@ Weaker-model tolerance: tool names (`search`→grep, `create`→write, …) and 
 - **`/compact`**: summarizes the session into a fresh one — and runs **automatically at 85% of the context budget** (`autoCompact: "off"` disables), so long sessions never degrade into silently-elided history.
 - **`/share`** (also `ap share [id]`): exports the transcript as **one self-contained HTML file** (inline CSS, zero external assets) under `<dataDir>/shares/` — collapsible tool calls/results, dark theme. No hosted service, no account: host it, mail it, attach it to a PR.
 - **`AGENTS.md`** project notes supported alongside `AP.md`/`HARNESS.md`; `ap resume` (interactive picker) and `ap sessions search <q>` (ripgrep over transcripts).
+- **Memory & self-improvement**: the agent persists what it learns to `<dataDir>/memory/*.md` — corrections you make **and** techniques that cracked tricky problems — and consults them in every future session (snapshotted per session, so prompt caching is unaffected). Recurring patterns get promoted into custom commands, closing the observe → persist → reuse loop natively at near-zero token cost. Want the full ceremony (episodic logs, confidence scoring)? `ap skills add charon-fan/agent-playbook --skill self-improving-agent`.
 
 ## Loop mode — run until verifiably done
 
@@ -274,3 +275,7 @@ bun add -g @sanjaydoppalapudi/agentplatform
 yarn global add @sanjaydoppalapudi/agentplatform
 pnpm add -g @sanjaydoppalapudi/agentplatform
 ```
+
+## Credits
+
+AP's code is original and dependency-free, but its best ideas were learned from opencode, Claude Code, Codex CLI, Cline, the MCP/ACP protocols, models.dev, and the skills.sh ecosystem — the full ledger of who inspired what is in [CREDITS.md](CREDITS.md).

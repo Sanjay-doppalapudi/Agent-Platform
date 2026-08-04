@@ -67,7 +67,7 @@ Legend: **P0** build next · **P1** valuable, after P0 · **P2** someday · **Sk
 - **ACP editor embedding**: SHIPPED (acp.ts) — ACP v1 for Zed: modes, permission dialogs, slash commands, `session/load`, editor-MCP passthrough.
 - **Session sharing** (opencode): reuse the plan-HTML exporter to render a whole session transcript to a self-contained HTML file (`/share` → file, user hosts it however they like). ~40 lines, could promote to P1.
 - **Cron/scheduled runs**: CUT (decided 2026-08): no scheduler will be built — the OS scheduler (Task Scheduler / cron) invoking `ap run -p … --json` is the supported pattern.
-- **Skill self-improvement loop** (Hermes): our memory system is the seed; a "promote memory → command template" step could come later.
+- **Skill self-improvement loop** (Hermes, charon-fan/agent-playbook): SHIPPED natively (2026-08) — memory now captures successful techniques as well as corrections, with promotion of recurring patterns into custom commands baked into the prompt; the full playbook remains available as a skills.sh install for those who want it (see CREDITS.md).
 
 ### Skip (with reasons)
 

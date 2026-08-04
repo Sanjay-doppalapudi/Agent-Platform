@@ -102,7 +102,7 @@ PLAN MODE: You have read-only tools. Explore the codebase, then produce a concre
     const memDir = join(config.dataDir, "memory");
     prompt += `
 
-Memory: when the user corrects you or wants something different from what you did, save it — write ${memDir}\\<short-slug>.md with exactly three lines: "Title: …", "User wanted: …", "Why (guess): …". Consult the saved memories below before repeating a choice the user disliked.`;
+Memory: when the user corrects you or wants something different from what you did, save it — write ${memDir}\\<short-slug>.md with exactly three lines: "Title: …", "User wanted: …", "Why (guess): …". Also save one after cracking a tricky problem whose approach will recur (Title = the technique). Consult the saved memories below before repeating a choice the user disliked; if one keeps applying, promote it into a custom command (.ap/commands/<name>.md) so it becomes reusable structure.`;
     const memories = memoriesForSession(memDir, config.sessionId ?? "");
     if (memories) prompt += `\n\nSaved user preferences:\n${memories}`;
 
