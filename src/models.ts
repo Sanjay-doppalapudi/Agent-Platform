@@ -18,6 +18,7 @@ export interface CatalogProvider {
     name?: string;
     cost?: { input?: number; output?: number; cache_read?: number };
     limit?: { context?: number; output?: number };
+    reasoning?: boolean;
   }>;
 }
 
@@ -97,6 +98,26 @@ export function modelPricing(catalog: Catalog, provider: string, model: string):
   for (const prov of Object.values(catalog)) {
     const hit = probe(prov);
     if (hit) return hit;
+  }
+  return null;
+}
+
+/** Whether a model advertises reasoning support in models.dev (null = not
+ *  listed / unknown). Same exact-then-gateway-fallback probe as pricing. */
+export function modelReasoning(catalog: Catalog, provider: string, model: string): boolean | null {
+  const short = model.split("/").pop()!;
+  const probe = (prov?: CatalogProvider): boolean | null => {
+    for (const id of [model, short]) {
+      const m = prov?.models?.[id];
+      if (m && typeof m.reasoning === "boolean") return m.reasoning;
+    }
+    return null;
+  };
+  const exact = probe(catalog[provider]);
+  if (exact !== null) return exact;
+  for (const prov of Object.values(catalog)) {
+    const hit = probe(prov);
+    if (hit !== null) return hit;
   }
   return null;
 }

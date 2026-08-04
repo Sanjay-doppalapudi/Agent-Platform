@@ -26,12 +26,14 @@ const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
 const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
 const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
 
-// Accent bar marking agent-output lines.
-const BAR = "\x1b[2;36m▌\x1b[0m ";
-const barify = (chunk: string): string => {
+// Visual hierarchy without an accent bar: answer text renders flush-left in
+// the default color; everything that is NOT the answer (tool lines, diffs,
+// reasoning, warnings) is indented two spaces and color-coded.
+const IND = "  ";
+const indent2 = (chunk: string): string => {
   const parts = chunk.split("\n");
   return parts
-    .map((l, i) => (i === parts.length - 1 ? l : l ? BAR + l : l))
+    .map((l, i) => (i === parts.length - 1 ? l : l ? IND + l : l))
     .join("\n");
 };
 
@@ -53,7 +55,7 @@ function rowsUp(s: string): number {
 
 const BUILTIN_CMDS = new Set([
   "exit", "q", "quit", "new", "resume", "session", "sessions", "sandbox",
-  "model", "models", "mode", "plan", "code", "system", "context", "agents",
+  "model", "models", "mode", "plan", "code", "system", "context", "agents", "effort",
   "undo", "diff", "checkpoints", "restore", "worktree", "compact", "share",
 ]);
 
@@ -61,6 +63,7 @@ const COMMANDS: SlashCommand[] = [
   { name: "/plan", desc: "read-only mode: explore & produce a plan" },
   { name: "/code", desc: "full mode: all tools (default)" },
   { name: "/model", desc: "switch model, or provider/model", hasArg: true },
+  { name: "/effort", desc: "reasoning effort: low|medium|high|off (models.dev-aware)", hasArg: true },
   { name: "/models", desc: "search the models.dev catalog", hasArg: true },
   { name: "/new", desc: "start a fresh session" },
   { name: "/resume", desc: "resume a session by id", hasArg: true },
@@ -137,10 +140,10 @@ class TurnRenderer {
         if (this.mode !== "reason") {
           d = d.replace(/^\s+/, "");
           if (!d) return out;
-          out += BAR + dim("✻ ");
+          out += IND + dim("✻ ");
           this.mode = "reason";
         }
-        return out + dim(d.replace(/\n/g, "\n▌ "));
+        return out + dim(d.replace(/\n/g, `\n${IND}`));
       }
       case "text": {
         let out = "";
@@ -149,14 +152,14 @@ class TurnRenderer {
         const rendered = this.md.push(e.delta);
         if (this.planMode) {
           if (this.planTruncated) return out;
-          out += barify(rendered);
+          out += rendered;
           this.planLines += (rendered.match(/\n/g) ?? []).length;
           if (this.planLines >= PLAN_GIST_LINES) {
             this.planTruncated = true;
-            out += dim("▌ … long plan — the full version opens in the browser when done\n");
+            out += dim("… long plan — the full version opens in the browser when done\n");
           }
         } else {
-          out += barify(rendered);
+          out += rendered;
         }
         return out;
       }
@@ -164,17 +167,19 @@ class TurnRenderer {
         let out = this.endSegment();
         if (!this.planMode) {
           const diff = renderDiff(e.name, e.args);
-          if (diff) out += barify(diff);
+          if (diff) out += indent2(diff);
         }
         return out;
       }
       case "tool_end": {
+        // Tool lines are indented + color-coded (cyan action, dim metadata)
+        // so they can never be confused with the flush-left answer text.
         const mark = e.error ? red("✗") : green("✓");
         const summary = toolSummary(e.name, e.output, e.error);
-        let out = `${BAR}${mark} ${label ?? e.name}${dim(` · ${summary} · ${e.ms}ms`)}\n`;
+        let out = `${IND}${mark} ${cyan(label ?? e.name)}${dim(` · ${summary} · ${e.ms}ms`)}\n`;
         if (e.name === "todo" && !e.error) {
           // The checklist IS the progress display — always show it.
-          for (const l of e.output.split("\n").slice(1)) out += `${BAR}${dim(`  ${l}`)}\n`;
+          for (const l of e.output.split("\n").slice(1)) out += `${IND}${dim(`  ${l}`)}\n`;
         }
         return out;
       }
@@ -182,9 +187,9 @@ class TurnRenderer {
         return this.endSegment();
       case "subline":
         // Nested subagent progress — details channel only.
-        return this.details ? `${this.endSegment()}${BAR}${dim(`  ${e.text}`)}\n` : "";
+        return this.details ? `${this.endSegment()}${IND}${dim(`  ${e.text}`)}\n` : "";
       case "warn":
-        return `${this.endSegment()}${BAR}${yellow(`⚠ ${e.message}`)}\n`;
+        return `${this.endSegment()}${IND}${yellow(`⚠ ${e.message}`)}\n`;
       case "error": {
         const hint = errorHint(e.message);
         return `\n${dim("error:")} ${e.message}${hint ? `\n${dim(hint)}` : ""}\n`;
@@ -198,7 +203,7 @@ class TurnRenderer {
     let out = "";
     if (this.mode === "text") {
       const rest = this.md.flush();
-      if (rest && !this.planTruncated) out += BAR + rest;
+      if (rest && !this.planTruncated) out += rest;
     }
     if (this.mode !== "none") out += "\n";
     this.mode = "none";
@@ -278,6 +283,9 @@ export async function replMain(flags: CliFlags) {
   // One-time contextual hints: teach a feature the first time it matters.
   const hinted = new Set<string>();
 
+  // Reasoning effort: sent as `reasoning_effort` when set (/effort, config).
+  let effort: "low" | "medium" | "high" | undefined = config.reasoningEffort;
+
   // Session spend for the status line. Pricing resolves lazily from the
   // models.dev catalog AFTER the first turn (never on the startup path).
   const spend = { prompt: 0, cached: 0, completion: 0 };
@@ -286,6 +294,7 @@ export async function replMain(flags: CliFlags) {
 
   const buildStatus = (): string => {
     const parts: string[] = [dim(`${provider.name}/${provider.model}`)];
+    if (effort) parts.push(dim(`effort ${effort}`));
     let chars = 0;
     try {
       chars = buildSystemPrompt(config).length;
@@ -562,6 +571,32 @@ export async function replMain(flags: CliFlags) {
           }
           continue;
         }
+        case "effort": {
+          const arg = rest[0]?.toLowerCase();
+          if (!arg) {
+            console.log(dim(`reasoning effort: ${effort ?? "provider default"} — /effort low | medium | high | off`));
+            continue;
+          }
+          if (arg === "off" || arg === "default") {
+            effort = undefined;
+            console.log(dim("reasoning effort → provider default"));
+            continue;
+          }
+          if (arg !== "low" && arg !== "medium" && arg !== "high") {
+            console.log(dim("usage: /effort low | medium | high | off"));
+            continue;
+          }
+          effort = arg;
+          let note = "";
+          try {
+            const { loadCatalog, modelReasoning } = await import("./models.ts");
+            const sup = modelReasoning(await loadCatalog(config.dataDir), provider.name, provider.model);
+            if (sup === false) note = " — models.dev: this model does NOT advertise reasoning; the provider may ignore or reject the parameter";
+            else if (sup === true) note = " (model supports reasoning per models.dev)";
+          } catch {}
+          console.log(dim(`reasoning effort → ${arg}${note}`));
+          continue;
+        }
         case "models": {
           try {
             const { loadCatalog, searchModels } = await import("./models.ts");
@@ -827,7 +862,7 @@ export async function replMain(flags: CliFlags) {
         spinner.stop();
         const sbHint = hinted.has("sandbox") ? "" : dim(" · /sandbox shows the rules");
         hinted.add("sandbox");
-        writeBoth(`${BAR}${yellow("?")} ${req.action}: ${req.detail} ${dim("— allow? [y/N/a=always]")}${sbHint} `);
+        writeBoth(`  ${yellow("?")} ${req.action}: ${req.detail} ${dim("— allow? [y/N/a=always]")}${sbHint} `);
         const ans = await readPermitKey();
         writeBoth(dim(ans === "a" ? "always\n" : ans === "y" ? "yes\n" : "no\n"));
         if (ans === "a") { sessionAllows.add(key); return true; }
@@ -874,7 +909,7 @@ export async function replMain(flags: CliFlags) {
 
       if (e.type === "tool_end" && !e.error && e.name === "agent" && !hinted.has("agents")) {
         hinted.add("agents");
-        writeBoth(`${BAR}${dim("  /agents lists this session's subagents")}\n`);
+        writeBoth(`  ${dim("  /agents lists this session's subagents")}\n`);
       }
 
       if (e.type === "tool_start" || e.type === "tool_end") spinner.start(spinnerLabel());
@@ -886,7 +921,10 @@ export async function replMain(flags: CliFlags) {
     let finalText = "";
     try {
       await mcpReady; // no-op after the first turn
-      finalText = await runTurn(config, provider, session, userText, emit, ctrl.signal, { permit });
+      finalText = await runTurn(config, provider, session, userText, emit, ctrl.signal, {
+        permit,
+        extra: effort ? { reasoning_effort: effort } : undefined,
+      });
     } catch {
       // error already emitted
     } finally {

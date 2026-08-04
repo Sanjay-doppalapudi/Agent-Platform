@@ -24,6 +24,7 @@ export interface CliFlags {
   check?: string[];
   max?: number;
   agent?: string;
+  effort?: string;
 }
 
 function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string[] } {
@@ -53,6 +54,7 @@ function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string
       case "--check": (flags.check ??= []).push(argv[++i]!); break;
       case "--max": flags.max = Number(argv[++i]); break;
       case "--agent": flags.agent = argv[++i]; break;
+      case "--effort": flags.effort = argv[++i]; break;
       case "--version": case "-v": console.log(VERSION); process.exit(0);
       case "--help": case "-h": printHelp(); process.exit(0);
       default:
@@ -205,6 +207,7 @@ Provider / model:
 
 Behavior:
   --mode <plan|code>   plan = read-only tools + produce a plan (also: --plan)
+  --effort <level>     reasoning effort low|medium|high (config: reasoningEffort)
   --light              minimal profile: core 6 tools, smallest prompt, no extras
   --cwd <dir>          working directory for the agent
   --session <id>       attach to a session   --resume <id> / -c   resume (REPL)

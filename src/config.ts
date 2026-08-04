@@ -50,6 +50,9 @@ export interface Config {
   checkpoints: "on" | "off";
   /** REPL auto-compaction at 85% of contextBudgetChars (full profile only). */
   autoCompact: "on" | "off";
+  /** Default reasoning effort sent as `reasoning_effort` (models that don't
+   *  support it may ignore or reject it — /effort checks models.dev). */
+  reasoningEffort?: "low" | "medium" | "high";
   /** Shell hooks: preBash/preWrite/preEdit (nonzero exit blocks the tool),
    *  afterEdit (nonzero output is fed back to the model to self-fix).
    *  Lifecycle: onDone/onError — a shell command (AP_EVENT/AP_PAYLOAD env)

@@ -90,6 +90,7 @@ Type `/` to open the command menu (↑/↓ navigate, Enter/Tab select, Esc close
 |---|---|
 | `/plan` / `/code` | switch mode — plan is structurally read-only (only read/glob/grep schemas are sent) and produces an implementation plan; code (default) has all tools. The prompt shows the active mode: `plan › ` / `code › ` |
 | `/model <id>` | switch model; `/model <provider>/<model>` switches provider too — unknown providers are resolved live from models.dev |
+| `/effort low\|medium\|high\|off` | reasoning effort, sent as `reasoning_effort` (config default: `reasoningEffort`); checks models.dev whether the model supports reasoning and warns if not — shown on the status line |
 | `/models <query>` | search the models.dev catalog |
 | `/new` `/resume <id>` `/sessions` | session management |
 | `/undo` `/diff [n]` `/checkpoints` `/restore <hash>` | shadow-git checkpoint ops (see below) |
@@ -98,7 +99,7 @@ Type `/` to open the command menu (↑/↓ navigate, Enter/Tab select, Esc close
 | `/system` `/context` | inspect the system prompt / token usage |
 | `/exit` | quit (prints the session id + resume command) |
 
-**Ctrl+O** toggles details (reasoning + subagent progress); diffs always show — a file never changes without the diff having been visible. While off, details are buffered and replayed when you toggle back on. **Ctrl+C** aborts the running turn; at an empty prompt it exits. The spinner shows live elapsed time and output tokens (`⠹ thinking · 12s · ~340 tok`), the per-turn stats line includes context usage (`ctx 42%`, with a `/compact` reminder at 60%), and errors come with a suggested fix (`fix: ap auth <provider>`). First-time moments teach their command: the first sandbox prompt points at `/sandbox`, the first subagent at `/agents`.
+Output has a clean visual hierarchy: **answer text is flush-left** in the default color; everything that isn't the answer — tool lines (`✓` + cyan action + dim timing), diffs, dim `✻` reasoning, warnings — is indented two spaces. **Ctrl+O** toggles details (reasoning + subagent progress); diffs always show — a file never changes without the diff having been visible. While off, details are buffered and replayed when you toggle back on. **Ctrl+C** aborts the running turn; at an empty prompt it exits. The spinner shows live elapsed time and output tokens (`⠹ thinking · 12s · ~340 tok`), the per-turn stats line includes context usage (`ctx 42%`, with a `/compact` reminder at 60%), and errors come with a suggested fix (`fix: ap auth <provider>`). First-time moments teach their command: the first sandbox prompt points at `/sandbox`, the first subagent at `/agents`.
 
 Every edit/write renders a diff before it runs, built from the tool args (no extra I/O):
 
@@ -139,6 +140,7 @@ Project `ap.config.json` (walked up from cwd; legacy `harness.config.json` accep
 | `ignore` | `[]` | extends the hard ignore list (node_modules, .git, dist*, builds, trash, uploads, …) |
 | `checkpoints` | `"on"` | shadow-git checkpoint after every mutating turn (`"off"` disables) |
 | `autoCompact` | `"on"` | REPL auto-summarizes into a fresh session at 85% of the context budget (`"off"` disables; `/compact` stays manual) |
+| `reasoningEffort` | — | `"low"`/`"medium"`/`"high"` — default `reasoning_effort` sent with every request (`/effort` and `--effort` override) |
 | `hooks` | — | `preBash`/`preWrite`/`preEdit`/`afterEdit` tool hooks + `onDone`/`onError` lifecycle hooks (command or webhook URL) |
 | `mcpServers` | — | MCP servers, Claude Code format (also read from a project `.mcp.json`) |
 

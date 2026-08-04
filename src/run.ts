@@ -112,11 +112,13 @@ export async function runMain(flags: CliFlags) {
   await initMcp(config, (m) => process.stderr.write(`\x1b[33m⚠ ${m}\x1b[0m\n`));
 
   try {
+    const effort = (flags.effort ?? config.reasoningEffort)?.toLowerCase();
     await runTurn(config, provider, session, flags.prompt, emit, ctrl.signal, {
       systemOverride:
         flags.system ??
         (agentDef ? `${buildSystemPrompt(config)}\n\nRole — you are the "${agentDef.name}" agent:\n${agentDef.body}` : undefined),
       permit: flags.allowOutside ? async () => true : undefined, // undefined → auto-deny
+      extra: effort === "low" || effort === "medium" || effort === "high" ? { reasoning_effort: effort } : undefined,
     });
     if (md) process.stdout.write(md.flush());
     if (mutated) {
