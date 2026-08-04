@@ -1,6 +1,7 @@
 // Subagent tool: delegates a task to a child `ap run --json --light` process.
 // Children are always the light profile, so they cannot spawn further agents
 // (structural recursion cap). Zero deps — we spawn our own binary.
+import { existsSync } from "node:fs";
 import { resolvePath, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
@@ -20,10 +21,15 @@ export function listSubagents(): SubagentInfo[] {
   return registry;
 }
 
-/** How to re-invoke ourselves: compiled exe vs `bun src/index.ts`. */
+/** How to re-invoke ourselves: compiled exe vs `bun src/index.ts`.
+ * Compiled binaries embed the entry at a VIRTUAL path — "/$bunfs/…" on
+ * unix, "B:\~BUN\…" on Windows — so the reliable test is: does the entry
+ * exist on disk? If not, we're compiled and the exe alone re-runs itself. */
 function selfCmd(): string[] {
   const entry = process.argv[1] ?? "";
-  if (!entry || entry.includes("$bunfs")) return [process.execPath];
+  if (!entry || entry.includes("$bunfs") || entry.includes("~BUN") || !existsSync(entry)) {
+    return [process.execPath];
+  }
   return [process.execPath, entry];
 }
 
@@ -49,8 +55,17 @@ export async function agentTool(
 
   const proc = Bun.spawn(
     [...selfCmd(), "run", "-p", args.task, "--json", "--light", "--cwd", cwd],
-    { stdout: "pipe", stderr: "ignore", stdin: "ignore", windowsHide: true } as any,
+    { stdout: "pipe", stderr: "pipe", stdin: "ignore", windowsHide: true } as any,
   );
+  // Child stderr is the only place startup-phase crashes surface — keep a tail.
+  let stderrTail = "";
+  const stderrDone = (async () => {
+    try {
+      for await (const chunk of proc.stderr as any) {
+        stderrTail = (stderrTail + new TextDecoder().decode(chunk)).slice(-1000);
+      }
+    } catch {}
+  })();
 
   let killed = false;
   const timer = setTimeout(() => { killed = true; proc.kill(); }, timeoutMs);
@@ -86,6 +101,7 @@ export async function agentTool(
       }
     }
     await proc.exited;
+    await stderrDone;
   } finally {
     clearTimeout(timer);
     ctx.signal.removeEventListener("abort", onAbort);
@@ -98,10 +114,16 @@ export async function agentTool(
     ctx.subline?.(`◇ agent #${info.id} killed after ${secs}s`);
     throw new ToolError(`subagent #${info.id} timed out or was aborted after ${secs}s`);
   }
-  if (!finalText && errorMsg) {
-    info.status = "error";
-    ctx.subline?.(`◇ agent #${info.id} failed after ${secs}s`);
-    throw new ToolError(`subagent #${info.id} failed: ${errorMsg}`);
+  // A child that produced no final text failed, whatever the exit code says —
+  // surface every clue we have (error event, stderr tail, exit code).
+  if (!finalText) {
+    const code = proc.exitCode;
+    const clue = errorMsg || stderrTail.trim() || `exit code ${code}, no output`;
+    if (errorMsg || code !== 0) {
+      info.status = "error";
+      ctx.subline?.(`◇ agent #${info.id} failed after ${secs}s`);
+      throw new ToolError(`subagent #${info.id} failed: ${truncateMiddle(clue, 600)}`);
+    }
   }
   info.status = "done";
   ctx.subline?.(`◇ agent #${info.id} done · ${info.steps} steps · ${secs}s`);
