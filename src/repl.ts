@@ -54,7 +54,7 @@ function rowsUp(s: string): number {
 const BUILTIN_CMDS = new Set([
   "exit", "q", "quit", "new", "resume", "session", "sessions", "sandbox",
   "model", "models", "mode", "plan", "code", "system", "context", "agents",
-  "undo", "diff", "checkpoints", "restore", "worktree", "compact",
+  "undo", "diff", "checkpoints", "restore", "worktree", "compact", "share",
 ]);
 
 const COMMANDS: SlashCommand[] = [
@@ -75,6 +75,7 @@ const COMMANDS: SlashCommand[] = [
   { name: "/restore", desc: "restore a checkpoint by hash", hasArg: true },
   { name: "/worktree", desc: "new <slug> | list | back | merge <slug>", hasArg: true },
   { name: "/compact", desc: "summarize history into a fresh session" },
+  { name: "/share", desc: "export the transcript as one self-contained HTML file" },
   { name: "/system", desc: "show the system prompt" },
   { name: "/context", desc: "show context/token usage" },
   { name: "/exit", desc: "quit" },
@@ -727,6 +728,18 @@ export async function replMain(flags: CliFlags) {
         case "compact": {
           if (session.history.length < 4) { console.log(dim("nothing worth compacting yet")); continue; }
           await compactNow();
+          continue;
+        }
+        case "share": {
+          if (config.light) { console.log(dim("/share is a full-profile feature")); continue; }
+          if (!session.history.length) { console.log(dim("nothing to share yet")); continue; }
+          try {
+            const { exportSessionHtml } = await import("./shareview.ts");
+            const { openInBrowser } = await import("./planview.ts");
+            const p = exportSessionHtml(config.dataDir, session.id, session.history, `${provider.name}/${provider.model}`, config.cwd);
+            openInBrowser(p);
+            console.log(dim(`transcript → ${p} (opened in browser) — one self-contained file, host or send it anywhere`));
+          } catch (e) { console.log(dim(`share failed: ${(e as Error).message}`)); }
           continue;
         }
         default:

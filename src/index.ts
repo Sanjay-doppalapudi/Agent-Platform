@@ -192,6 +192,7 @@ Usage:
   ap auth <provider>       store an API key (hidden input, user-locked file)
   ap resume                pick a recent session to resume
   ap sessions [search q]   list sessions / full-text search them
+  ap share [id]            export a transcript as one self-contained HTML file
   ap prompt [--cwd dir]    print the exact system prompt for a directory
   ap tool <name> '<json>'  run one tool directly, no LLM (testing)
   ap help <command>        detailed help: ${Object.keys(HELP_TOPICS).join(" · ")}
@@ -400,6 +401,21 @@ Example:  ap mcp add fs bun x @modelcontextprotocol/server-filesystem .`);
 
     console.error(`usage: ap mcp [list] | ap mcp call <server> <tool> '<json>' | ap mcp add <name> <command...> [--url u] [--project] | ap mcp remove <name>`);
     process.exit(1);
+    break;
+  }
+  case "share": {
+    const { loadConfig } = await import("./config.ts");
+    const { Session } = await import("./session.ts");
+    const { exportSessionHtml } = await import("./shareview.ts");
+    const { openInBrowser } = await import("./planview.ts");
+    const config = loadConfig(flags);
+    const id = rest[0] ?? Session.latest(config.dataDir);
+    if (!id) { console.error("no sessions yet"); process.exit(1); }
+    const session = Session.load(config.dataDir, id);
+    if (!session.history.length) { console.error(`session ${id} is empty`); process.exit(1); }
+    const p = exportSessionHtml(config.dataDir, id, session.history, "", config.cwd);
+    console.log(p);
+    openInBrowser(p);
     break;
   }
   case "help": {

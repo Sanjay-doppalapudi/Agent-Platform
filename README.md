@@ -163,6 +163,7 @@ Weaker-model tolerance: tool names (`search`→grep, `create`→write, …) and 
 - **`websearch` tool**: web search via DuckDuckGo's HTML endpoint (plain fetch, no API key) — titles, URLs, snippets. **`fetch` tool**: URL → readable text (50KB cap); `render:true` runs the page through your *installed* Chrome/Edge headless (`--dump-dom`, ~300ms, nothing bundled) so JS-rendered pages work — falls back to plain fetch if no browser is found. **`todo` tool**: session checklist rendered live in the transcript.
 - **`/worktree new <slug> | list | back | merge <slug>`**: isolated git worktree + `ap/<slug>` branch per task — parallel work never collides.
 - **`/compact`**: summarizes the session into a fresh one — and runs **automatically at 85% of the context budget** (`autoCompact: "off"` disables), so long sessions never degrade into silently-elided history.
+- **`/share`** (also `ap share [id]`): exports the transcript as **one self-contained HTML file** (inline CSS, zero external assets) under `<dataDir>/shares/` — collapsible tool calls/results, dark theme. No hosted service, no account: host it, mail it, attach it to a PR.
 - **`AGENTS.md`** project notes supported alongside `AP.md`/`HARNESS.md`; `ap resume` (interactive picker) and `ap sessions search <q>` (ripgrep over transcripts).
 
 ## Loop mode — run until verifiably done
