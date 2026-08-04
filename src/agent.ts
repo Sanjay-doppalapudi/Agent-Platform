@@ -5,7 +5,7 @@ import type { Config, ResolvedProvider } from "./config.ts";
 import { ProviderError, streamChat, type Msg } from "./provider.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import type { Session } from "./session.ts";
-import { autoDenyPermit, execTool, getTool, isParallelSafe, resolveToolName, toolSchemasFor, type PermitFn } from "./tools/index.ts";
+import { autoDenyPermit, execTool, getTool, isParallelSafe, permissionFor, resolveToolName, toolSchemasFor, type PermitFn } from "./tools/index.ts";
 import type { Usage } from "./stream.ts";
 
 export type AgentEvent =
@@ -197,15 +197,23 @@ export async function runTurn(
         // Plan mode is structurally read-only; block hallucinated mutations too.
         r = { output: "blocked: plan mode is read-only (switch to code mode to apply changes)", error: true };
       } else {
+        // Per-tool permission rules first (explicit config wins), then the
+        // coarse permissions mode. "allow" skips only the ask gate — the path
+        // sandbox and bashGuard inside the tools still apply.
         let allowed = true;
-        if (config.permissions === "prompt" && getTool(canonical) && !getTool(canonical)!.readOnly) {
+        let denial = "denied by user";
+        const rule = permissionFor(config, canonical, tc.function.arguments);
+        if (rule === "deny") {
+          allowed = false;
+          denial = `blocked by permission config ("${canonical}": deny) — this tool/command is not permitted in this project`;
+        } else if (rule === "ask" || (rule === null && config.permissions === "prompt" && getTool(canonical) && !getTool(canonical)!.readOnly)) {
           allowed = await ctx.permit({
             action: `run ${canonical}`,
             detail: `${canonical} ${tc.function.arguments.slice(0, 120)}`,
           });
         }
         if (!allowed) {
-          r = { output: "denied by user", error: true };
+          r = { output: denial, error: true };
         } else if (preHook) {
           const h = runHook(preHook, config.cwd, canonical, tc.function.arguments);
           r = h.ok

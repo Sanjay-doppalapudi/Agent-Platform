@@ -8,7 +8,7 @@
 // AUTHORIZATION is enforced inside the tools themselves: ensureAllowed/
 // ensureReadable path checks, scanDangerous/scanCmdPaths for bash, hard-denied
 // AP-private paths, and plan mode's structurally read-only schema sets.
-import type { Config } from "../config.ts";
+import type { Config, PermissionVerdict } from "../config.ts";
 import type { ToolSchema } from "../provider.ts";
 import { ToolError, truncateMiddle } from "./shared.ts";
 import { readTool } from "./read.ts";
@@ -339,6 +339,46 @@ export function toolSchemasFor(config: Config): ToolSchema[] {
 export function isParallelSafe(name: string): boolean {
   const t = getTool(resolveToolName(name));
   return !!t && (t.parallelSafe ?? t.readOnly);
+}
+
+// ---- Per-tool permission rules (config.permission) ------------------------
+
+const globCache = new Map<string, RegExp>();
+function globRe(pat: string): RegExp {
+  let re = globCache.get(pat);
+  if (!re) {
+    const esc = pat.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".");
+    re = new RegExp(`^${esc}$`, "i");
+    globCache.set(pat, re);
+  }
+  return re;
+}
+
+/**
+ * Evaluate config.permission for a tool call: "allow" | "ask" | "deny", or
+ * null when no rule matches (caller falls back to the permissions mode).
+ * Tool keys match exactly or by * glob (first matching key wins, definition
+ * order). A record value holds command patterns matched against bash's cmd
+ * (full-string globs — write trailing *), with "*" as the default.
+ */
+export function permissionFor(config: Config, tool: string, argsRaw: string): PermissionVerdict | null {
+  const rules = config.permission;
+  if (!rules) return null;
+  for (const [key, val] of Object.entries(rules)) {
+    if (key !== tool && !globRe(key).test(tool)) continue;
+    if (typeof val === "string") return val;
+    let cmd = "";
+    try {
+      const a = JSON.parse(argsRaw || "{}");
+      cmd = String(a.cmd ?? a.command ?? a.script ?? "").trim();
+    } catch {}
+    for (const [pat, v] of Object.entries(val)) {
+      if (pat !== "*" && globRe(pat).test(cmd)) return v;
+    }
+    if (val["*"]) return val["*"];
+    return null;
+  }
+  return null;
 }
 
 /** Execute one tool call; returns model-facing result text (errors included). */

@@ -28,11 +28,19 @@ export interface McpServerSpec {
   type?: string;
 }
 
+export type PermissionVerdict = "allow" | "ask" | "deny";
+
 export interface Config {
   provider: string;
   providers: Record<string, ProviderEntry>;
   mode: "plan" | "code";
   permissions: "yolo" | "prompt";
+  /** Per-tool rules (opencode-style), evaluated before the permissions mode:
+   *  {"edit": "ask", "fetch": "deny", "mcp_*": "ask",
+   *   "bash": {"git push*": "ask", "*": "allow"}}
+   *  Tool keys and bash command patterns support * globs. "allow" skips the
+   *  ask gate only — the path sandbox and bashGuard still apply. */
+  permission?: Record<string, PermissionVerdict | Record<string, PermissionVerdict>>;
   sandbox: "workspace" | "off";
   bashGuard: "on" | "off";
   /** Light profile: smallest possible prompt + no optional features. Every

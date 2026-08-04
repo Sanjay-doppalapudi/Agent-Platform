@@ -127,6 +127,7 @@ Project `ap.config.json` (walked up from cwd; legacy `harness.config.json` accep
 |---|---|---|
 | `mode` | `"code"` | `"plan"` = read-only tools |
 | `permissions` | `"yolo"` | `"prompt"` asks before every mutating tool in the REPL |
+| `permission` | — | per-tool rules, evaluated first: `{"fetch": "deny", "edit": "ask", "mcp_*": "ask", "bash": {"git push*": "ask", "*": "allow"}}` — tool keys and bash command patterns take `*` globs; `deny` blocks outright, `ask` uses the interactive permit (auto-denied headless), `allow` skips only the ask gate (sandbox + bashGuard still apply) |
 | `sandbox` | `"workspace"` | writes/edits outside the workspace (+ data dir + session plans) need a y/N/always permission; `"off"` or `--no-sandbox` disables; headless denies unless `--allow-outside` |
 | `bashGuard` | `"on"` | dangerous shell patterns (recursive absolute deletes, format, registry edits, curl\|bash, …) are auto-blocked, warned, and logged to `<dataDir>/blocked-commands.jsonl` for provider feedback |
 | `streamIdleSeconds` | 90 | stalled provider streams abort and retry once instead of hanging (0 = off) |
