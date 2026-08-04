@@ -9,6 +9,20 @@
     "type": "git",
     "url": "git+https://github.com/Sanjay-doppalapudi/Agent-Platform.git"
   },
+  "homepage": "https://github.com/Sanjay-doppalapudi/Agent-Platform#readme",
+  "bugs": {
+    "url": "https://github.com/Sanjay-doppalapudi/Agent-Platform/issues"
+  },
+  "keywords": [
+    "agent",
+    "cli",
+    "coding-agent",
+    "llm",
+    "mcp",
+    "acp",
+    "openai-compatible",
+    "bun"
+  ],
   "license": "MIT",
   "type": "module",
   "bin": {
@@ -17,7 +31,9 @@
   "files": [
     "src",
     "ap.config.example.json",
-    "README.md"
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
   ],
   "engines": {
     "bun": ">=1.2.0"

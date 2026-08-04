@@ -1,5 +1,13 @@
 // Tool registry. Order is FIXED (part of the stable prompt prefix for caching).
 // Descriptions are one sentence — token budget. Schemas must never change bytes.
+//
+// TRUST MODEL (see SECURITY.md): tool calls originate from the model inside a
+// session the local user started and supervises. execTool normalizes names and
+// arguments (aliases, lenient JSON repair) but never widens capability — it
+// validates required arguments against each tool's schema below, and
+// AUTHORIZATION is enforced inside the tools themselves: ensureAllowed/
+// ensureReadable path checks, scanDangerous/scanCmdPaths for bash, hard-denied
+// AP-private paths, and plan mode's structurally read-only schema sets.
 import type { Config } from "../config.ts";
 import type { ToolSchema } from "../provider.ts";
 import { ToolError, truncateMiddle } from "./shared.ts";
@@ -344,6 +352,16 @@ export async function execTool(
     };
   }
   args = normalizeArgs(canonical, args);
+  // Schema validation: every required argument must be present after alias
+  // normalization — a malformed call fails fast here, never inside a tool.
+  const required: string[] = (tool.parameters as any)?.required ?? [];
+  const missing = required.filter((k) => args[k] === undefined || args[k] === null);
+  if (missing.length) {
+    return {
+      output: `missing required argument${missing.length > 1 ? "s" : ""} for ${canonical}: ${missing.join(", ")} — resend the call with all required fields`,
+      error: true,
+    };
+  }
   try {
     const output = await tool.run(args, ctx);
     return { output: truncateMiddle(output, RESULT_BACKSTOP_BYTES), error: false };

@@ -7,6 +7,7 @@ on:
     tags: ["v*"]
 permissions:
   contents: write
+  id-token: write # npm provenance attestation (OIDC)
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -32,7 +33,9 @@ jobs:
         with:
           node-version: 22
           registry-url: "https://registry.npmjs.org"
-      - run: npm publish
+      # --provenance links the published package to this exact commit + workflow
+      # run (Sigstore attestation) — verifiable on npm and scored by Socket.
+      - run: npm publish --provenance
         if: env.HAS_NPM_TOKEN == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

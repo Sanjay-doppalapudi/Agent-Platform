@@ -24,7 +24,12 @@ export type Emit = (e: AgentEvent) => void;
 const KEEP_RECENT_TOOL_MSGS = 12;
 const MAX_HOOK_CONTINUATIONS = 2;
 
-/** Run a config hook command; returns {ok, output}. 30s cap, never throws. */
+/** Run a config hook command; returns {ok, output}. 30s cap, never throws.
+ * TRUST MODEL (see SECURITY.md): the hook COMMAND string comes exclusively
+ * from the user's own config files (ap.config.json / <dataDir>/config.json)
+ * — never from model output or network input. Tool arguments reach the hook
+ * via environment variables (AP_TOOL/AP_ARGS), never interpolated into the
+ * command line, so hostile arguments cannot inject into the shell. */
 function runHook(cmd: string, cwd: string, tool: string, argsJson: string): { ok: boolean; output: string } {
   try {
     const p = Bun.spawnSync(
@@ -46,7 +51,9 @@ function runHook(cmd: string, cwd: string, tool: string, argsJson: string): { ok
 
 /** Fire-and-forget lifecycle hook: config `hooks.onDone` / `hooks.onError` is
  * either a shell command (payload in AP_EVENT / AP_PAYLOAD env) or an http(s)
- * URL that gets a JSON POST. Never blocks or fails the turn. */
+ * URL that gets a JSON POST. Never blocks or fails the turn. Same trust model
+ * as runHook: the command/URL comes only from the user's own config, and the
+ * payload travels via env vars / request body — never shell interpolation. */
 const pendingLifecycle = new Set<Promise<unknown>>();
 
 function fireLifecycle(config: Config, name: "onDone" | "onError", payload: Record<string, unknown>) {

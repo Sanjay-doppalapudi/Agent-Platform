@@ -239,6 +239,10 @@ Then open the Agent Panel and pick **AP**. Provider/model flags carry through: `
 - `GET /session/:id/messages` → raw message array
 - `DELETE /session/:id`
 
+## Security
+
+AP executes model-chosen commands on your machine by design — treat it like handing a very fast intern a terminal. The layered guardrails (write **and read** scoped sandbox with interactive permits, hard-denied AP-private data, dangerous-command blocklist, plan mode's structurally read-only schema set, required-argument schema validation, timeouts, output caps, 7-day background-log retention) plus the full threat model and vulnerability-reporting process are documented in [SECURITY.md](SECURITY.md). The honest boundary: this is a guardrail, not a VM — run genuinely untrusted code in a container. Zero runtime dependencies, and npm releases are published from GitHub Actions with **provenance attestation**.
+
 ## Why it's fast
 
 - **Stable prompt prefix**: byte-identical system prompt + fixed-order terse tool schemas (~1K tokens total) → provider automatic prefix caching hits from turn 2 (measured ~85–90% of prompt tokens cached).

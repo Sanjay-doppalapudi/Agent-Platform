@@ -1,5 +1,17 @@
+// Shell tool — SECURITY MODEL (full policy in SECURITY.md):
+// Commands are authored by the model within a session the local user started
+// and supervises; AP is a development tool, not a privilege boundary. Layered
+// guardrails, all best-effort by design (a guardrail, not a VM):
+//   1. scanDangerous — destructive patterns are BLOCKED outright (never
+//      prompted) and logged for provider feedback
+//   2. scanCmdPaths — path tokens outside the readable roots require an
+//      interactive user permit; AP-private data (credentials, transcripts,
+//      checkpoints) is hard-denied and cannot be permitted
+//   3. timeouts with process-tree kill, output caps, ctrl+c abort,
+//      background logs confined to the user's data dir with 7-day pruning
+// Run genuinely untrusted code in a container/VM, not behind these checks.
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, openSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, openSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { isInsideRoots, isPrivatePath, readRoots, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
@@ -155,6 +167,16 @@ export async function bashTool(
   if (args.background) {
     const logDir = join(ctx.config.dataDir, "logs");
     mkdirSync(logDir, { recursive: true });
+    // Retention: background logs can contain sensitive command output — prune
+    // anything older than 7 days whenever a new background process starts.
+    try {
+      const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
+      for (const f of readdirSync(logDir)) {
+        if (f.startsWith("bg-") && f.endsWith(".log") && statSync(join(logDir, f)).mtimeMs < cutoff) {
+          rmSync(join(logDir, f), { force: true });
+        }
+      }
+    } catch {}
     const logFile = join(logDir, `bg-${Date.now()}.log`);
     const fd = openSync(logFile, "a");
     const child = spawn(prefix[0]!, [...prefix.slice(1), args.cmd], {
