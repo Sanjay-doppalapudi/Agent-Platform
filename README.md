@@ -2,7 +2,7 @@
 
 # Agent Platform (`ap`)
 
-Minimal, fast coding agent CLI. OpenAI-compatible providers only (OpenCode Go, OpenRouter, NVIDIA NIM, any base_url). Core tools: `read` · `write` · `edit` · `bash` · `glob` · `grep` (+ `agent` · `fetch` · `todo` · `websearch` in the full profile). Zero runtime dependencies — Bun built-ins only. ~45ms cold start.
+Minimal, fast coding agent CLI. OpenAI-compatible providers only (OpenCode Go, OpenRouter, NVIDIA NIM, any base_url). Core tools: `read` · `write` · `edit` · `bash` · `glob` · `grep` (+ `agent` · `fetch` · `todo` · `websearch` in the full profile). Plugs into the existing ecosystem: **MCP client** (any MCP server's tools become agent tools), **ACP agent** (runs inside Zed), **skills.sh / Claude Code skills**, lifecycle **hooks/webhooks**. Zero runtime dependencies — Bun built-ins only. ~45ms cold start.
 
 ```
 ◆ AP · opencode-go/minimax-m3
@@ -69,12 +69,15 @@ ap                      # interactive REPL in the current directory
 ap run -p "task"        # one-shot; --json emits NDJSON AgentEvents
 ap loop -p "goal"       # loop work→verify until the goal is verifiably done
 ap skills               # list / install SKILL.md packs (skills.sh compatible)
+ap mcp                  # connect MCP servers — their tools become agent tools
+ap acp                  # ACP agent for editors (Zed): stdio, modes, permissions
 ap serve [--port 4141]  # HTTP server mode (sessions + SSE)
 ap models [query]       # search the models.dev catalog (context + pricing)
 ap auth <provider>      # store an API key
+ap resume / ap sessions # pick a session to resume / list + full-text search
 ap prompt [--cwd dir]   # print the system prompt used for a directory
 ap tool grep '{"pattern":"foo"}'   # run one tool directly (testing)
-ap help <command>       # detailed per-command help (run · loop · skills · serve · sessions)
+ap help <command>       # detailed help (run · loop · skills · mcp · acp · serve · sessions)
 ```
 
 Common flags: `--provider <name>` · `-m/--model <id>` · `--cwd <dir>` · `--mode plan|code` (`--plan`) · `--session <id>` · `-c/--continue` · `--base-url <url> --api-key <key>` for any ad-hoc endpoint.
@@ -89,6 +92,9 @@ Type `/` to open the command menu (↑/↓ navigate, Enter/Tab select, Esc close
 | `/model <id>` | switch model; `/model <provider>/<model>` switches provider too — unknown providers are resolved live from models.dev |
 | `/models <query>` | search the models.dev catalog |
 | `/new` `/resume <id>` `/sessions` | session management |
+| `/undo` `/diff [n]` `/checkpoints` `/restore <hash>` | shadow-git checkpoint ops (see below) |
+| `/worktree` `/compact` `/agents` | worktree per task · summarize into fresh session · list subagents |
+| `/mcp` `/skills` `/sandbox` | MCP server status · installed skills · sandbox state/toggle |
 | `/system` `/context` | inspect the system prompt / token usage |
 | `/exit` | quit (prints the session id + resume command) |
 
@@ -130,6 +136,9 @@ Project `ap.config.json` (walked up from cwd; legacy `harness.config.json` accep
 | `shell` | `"auto"` | Git Bash if found, else PowerShell (`bash`/`powershell`/`cmd`) |
 | `parallelPolicy` | `"safe"` | read-only tools run parallel, mutations serial (`all`/`none`) |
 | `ignore` | `[]` | extends the hard ignore list (node_modules, .git, dist*, builds, trash, uploads, …) |
+| `checkpoints` | `"on"` | shadow-git checkpoint after every mutating turn (`"off"` disables) |
+| `hooks` | — | `preBash`/`preWrite`/`preEdit`/`afterEdit` tool hooks + `onDone`/`onError` lifecycle hooks (command or webhook URL) |
+| `mcpServers` | — | MCP servers, Claude Code format (also read from a project `.mcp.json`) |
 
 **API keys** live apart from config in `<dataDir>/credentials.json`, file-ACL'd to your user (`ap auth <provider>`). Resolution: `--api-key` → `HARNESS_API_KEY` → config `apiKey` → provider env var → credential store.
 
@@ -211,13 +220,15 @@ Each session is one append-only JSONL file in `<dataDir>/sessions/<id>.jsonl` �
 
 `ap acp` speaks [ACP](https://agentclientprotocol.com) v1 over stdio, so AP runs **inside Zed** (and any ACP editor) as a first-class agent. It's the same event stream, rendered differently: text → message chunks, reasoning → thought chunks, tool calls → live tool-call cards with the right icons, **sandbox permission requests → native editor dialogs**, plan/code → ACP session modes (switchable from the editor's mode picker), cancel → clean turn abort, and sessions persist (`loadSession`). MCP servers configured in the editor are passed straight through to AP's own MCP client.
 
-Zed `settings.json`:
+**Slash commands work in the editor too**: AP advertises `/plan` · `/code` · `/model` · `/undo` · `/diff` · `/checkpoints` · `/mcp` · `/skills` · `/context` over ACP — type `/` in the agent panel and they autocomplete; they execute instantly inside the adapter (no model round-trip).
+
+Zed `settings.json` (one `agent_servers` block — merge with existing entries, duplicate keys silently override):
 
 ```json
-{ "agent_servers": { "AP": { "command": "ap", "args": ["acp"] } } }
+{ "agent_servers": { "AP": { "type": "custom", "command": "ap", "args": ["acp"] } } }
 ```
 
-Then open the Agent Panel and pick **AP**. Provider/model flags carry through: `"args": ["acp", "--provider", "openrouter", "-m", "deepseek-v4-pro"]`.
+Then open the Agent Panel and pick **AP**. Provider/model flags carry through: `"args": ["acp", "--provider", "openrouter", "-m", "deepseek-v4-pro"]`. To debug a connection, Zed's `dev: open acp logs` (command palette) shows the raw JSON-RPC traffic; AP's diagnostics appear there prefixed `[acp]`.
 
 ## Server API (for programmatic drivers)
 
@@ -240,10 +251,10 @@ Then open the Agent Panel and pick **AP**. Provider/model flags carry through: `
 ## Releasing
 
 ```sh
-git tag v0.1.0 && git push --tags
+bun run push
 ```
 
-GitHub Actions cross-compiles all four platform binaries (`ap-windows-x64.exe`, `ap-linux-x64`, `ap-darwin-arm64`, `ap-darwin-x64`) and attaches them to the release; the install one-liners always fetch the latest release.
+One command: bumps the version, commits, tags `v0.x.y`, and pushes. The tag triggers GitHub Actions, which cross-compiles all four platform binaries (`ap-windows-x64.exe`, `ap-linux-x64`, `ap-darwin-arm64`, `ap-darwin-x64`) and attaches them to the release; the install one-liners always fetch the latest release. (Manual equivalent: `git tag v0.x.y && git push --tags`.)
 
 **Registry installs** (after `npm publish` — package is `@sanjaydoppalapudi/agentplatform`, command is still `ap`):
 

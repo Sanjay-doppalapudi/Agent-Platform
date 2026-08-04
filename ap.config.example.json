@@ -3,7 +3,7 @@
   "providers": {
     "opencode-go": {
       "baseUrl": "https://opencode.ai/zen/go/v1",
-      "apiKeyEnv": "OPENCODE_API_KEY",
+      "apiKeyEnv": "OPENCODE_GO_API_KEY",
       "model": "minimax-m3"
     },
     "openrouter": {
@@ -11,7 +11,7 @@
       "apiKeyEnv": "OPENROUTER_API_KEY",
       "model": "anthropic/claude-sonnet-4.5",
       "cacheControl": true,
-      "headers": { "HTTP-Referer": "https://localhost", "X-Title": "harness" }
+      "headers": { "HTTP-Referer": "https://localhost", "X-Title": "ap" }
     },
     "nim": {
       "baseUrl": "https://integrate.api.nvidia.com/v1",
@@ -22,6 +22,7 @@
   "permissions": "yolo",
   "sandbox": "workspace",
   "bashGuard": "on",
+  "checkpoints": "on",
   "streamIdleSeconds": 90,
   "maxIterations": 40,
   "contextBudgetChars": 400000,
@@ -29,5 +30,7 @@
   "shell": "auto",
   "parallelPolicy": "safe",
   "ignore": [],
-  "dataDir": "~/.harness"
+  "hooks": {},
+  "mcpServers": {},
+  "dataDir": "~/.ap"
 }

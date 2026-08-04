@@ -1,6 +1,19 @@
 # AP feature roadmap — competitive survey & implementation report
 
-Generated 2026-08-01. Sources surveyed: opencode, Claude Code, OpenAI Codex CLI, Cline, xAI Grok Build, Nous Hermes Agent, OpenClaw, tmux. Constraint for everything below: **zero or near-zero dependencies, nothing on the startup hot path, prompt-prefix byte-stability preserved, every feature gated off in `ap --light`.**
+Generated 2026-08-01, status updated 2026-08-04. Sources surveyed: opencode, Claude Code, OpenAI Codex CLI, Cline, xAI Grok Build, Nous Hermes Agent, OpenClaw, tmux. Constraint for everything below: **zero or near-zero dependencies, nothing on the startup hot path, prompt-prefix byte-stability preserved, every feature gated off in `ap --light`.**
+
+## Status (2026-08-04) — shipped since this survey
+
+- **All of P0 and P1** (checkpoints/undo, subagents, custom commands, AGENTS.md, @file, tool hooks, /compact, session search, worktrees, fetch+todo tools, resume picker).
+- **Web**: `websearch` (DuckDuckGo scrape) + `fetch render:true` (system Chrome/Edge headless).
+- **Loop mode** (`ap loop`): work→check→audit until verifiably done; stall detection, compaction, per-iteration diffs, LOOP_BLOCKED.
+- **Read-scoped sandbox**: reads outside the workspace permit-gated, AP-private data hard-denied, bash path scanning.
+- **Skills**: skills.sh / Claude Code SKILL.md packs, zero-dep GitHub installer.
+- **MCP client** (was P2 → shipped): stdio + Streamable HTTP, Claude-Code-format config, dynamic tools frozen for cache stability, `ap mcp` CLI.
+- **ACP adapter** (was P2 → shipped): `ap acp` for Zed — session modes, native permission dialogs, slash commands, session load, editor-MCP passthrough.
+- **Lifecycle hooks**: `hooks.onDone`/`onError` — shell command or webhook POST when a turn finishes.
+
+Remaining candidates: `/share` transcript export, tmux adapter (unix), `/ps` background manager, auto-branch + `/commit`, skill self-improvement.
 
 ## The two-profile model (implemented)
 
@@ -50,8 +63,8 @@ Legend: **P0** build next · **P1** valuable, after P0 · **P2** someday · **Sk
 
 ### P2 — someday / conditional
 
-- **MCP client** (everyone has it): stdio JSON-RPC is doable dependency-free (~250 lines), but each MCP server the user adds costs prompt tokens and startup spawns — gate hard behind config; connect lazily on first use.
-- **ACP editor embedding** (Grok Build): our `ap serve` API is already close; map to ACP when an editor actually asks for it.
+- **MCP client**: SHIPPED (mcp.ts) — stdio + Streamable HTTP, zero-dep, lazy connect before the first turn, tool list frozen per process for prompt-cache stability, `.mcp.json`/`mcpServers` Claude Code config compat, `ap mcp list/call/add/remove`.
+- **ACP editor embedding**: SHIPPED (acp.ts) — ACP v1 for Zed: modes, permission dialogs, slash commands, `session/load`, editor-MCP passthrough.
 - **Session sharing** (opencode): reuse the plan-HTML exporter to render a whole session transcript to a self-contained HTML file (`/share` → file, user hosts it however they like). ~40 lines, could promote to P1.
 - **Cron/scheduled runs**: CUT (decided 2026-08): no scheduler will be built — the OS scheduler (Task Scheduler / cron) invoking `ap run -p … --json` is the supported pattern.
 - **Skill self-improvement loop** (Hermes): our memory system is the seed; a "promote memory → command template" step could come later.
@@ -89,10 +102,10 @@ PR flow: `gh pr create` via the bash tool already works today (user's gh is auth
 
 ## 5. Suggested build order
 
-1. **P0 batch** (checkpoints+/undo, subagents, custom commands, AGENTS.md, @file, post-edit hook) — ~400 lines total, transforms capability while `--light` stays untouched.
-2. Worktrees + auto-branch + `/commit` (§4).
-3. `/compact`, session search, `/ps` background manager, `fetch` tool, todo tool.
-4. tmux adapter (unix), `/share` transcript export.
-5. Re-evaluate MCP once real demand appears.
+1. ~~**P0 batch** (checkpoints+/undo, subagents, custom commands, AGENTS.md, @file, post-edit hook)~~ DONE.
+2. Worktrees DONE; auto-branch + `/commit` (§4) remain.
+3. ~~`/compact`, session search, `fetch` tool, todo tool~~ DONE; `/ps` background manager remains.
+4. tmux adapter (unix), `/share` transcript export — still open.
+5. ~~Re-evaluate MCP once real demand appears~~ DONE — MCP client + ACP adapter shipped (see Status).
 
 Every step: typecheck → `ap tool`/live verification → `bun run push` (version bump, binaries, npm — automated).
