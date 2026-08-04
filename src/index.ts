@@ -23,6 +23,7 @@ export interface CliFlags {
   light?: boolean;
   check?: string[];
   max?: number;
+  agent?: string;
 }
 
 function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string[] } {
@@ -51,6 +52,7 @@ function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string
       case "--light": flags.light = true; break;
       case "--check": (flags.check ??= []).push(argv[++i]!); break;
       case "--max": flags.max = Number(argv[++i]); break;
+      case "--agent": flags.agent = argv[++i]; break;
       case "--version": case "-v": console.log(VERSION); process.exit(0);
       case "--help": case "-h": printHelp(); process.exit(0);
       default:
@@ -69,6 +71,8 @@ const HELP_TOPICS: Record<string, string> = {
 
   --json            one AgentEvent per line (NDJSON) on stdout instead
   --allow-outside   permit writes outside the workspace (otherwise denied)
+  --agent <name>    run as a named agent profile (.ap/agents/<name>.md:
+                    frontmatter description/model/tools, body = role)
   --session <id>    continue an existing session
   --system <text>   replace the system prompt for this run
 

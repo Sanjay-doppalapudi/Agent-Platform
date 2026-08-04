@@ -2,6 +2,7 @@
 // --json → one AgentEvent per line (NDJSON) on stdout.
 import { loadConfig, resolveProvider } from "./config.ts";
 import { lifecycleSettled, runTurn, type AgentEvent } from "./agent.ts";
+import { buildSystemPrompt } from "./prompt.ts";
 import { Checkpoints } from "./checkpoint.ts";
 import { initMcp } from "./mcp.ts";
 import { getTool } from "./tools/index.ts";
@@ -20,6 +21,32 @@ export async function runMain(flags: CliFlags) {
     config.permissions = "yolo";
     process.stderr.write(`permissions:"prompt" is interactive-only — running as yolo (sandbox still applies)\n`);
   }
+
+  // Named agent profile: role instructions + optional model/tool whitelist.
+  let agentDef: import("./agents.ts").AgentDef | null = null;
+  if (flags.agent) {
+    const { discoverAgents } = await import("./agents.ts");
+    const defs = discoverAgents(config);
+    agentDef = defs.find((a) => a.name === flags.agent!.toLowerCase()) ?? null;
+    if (!agentDef) {
+      console.error(`unknown agent "${flags.agent}" — available: ${defs.map((a) => a.name).join(", ") || "(none — add .ap/agents/<name>.md)"}`);
+      process.exit(1);
+    }
+    if (agentDef.tools?.length) config.toolFilter = agentDef.tools;
+    if (agentDef.model && !flags.model) {
+      // "provider/model" only when the prefix is a configured provider —
+      // model ids themselves contain slashes (e.g. anthropic/claude-…).
+      const slash = agentDef.model.indexOf("/");
+      const pfx = slash > 0 ? agentDef.model.slice(0, slash) : "";
+      if (pfx && config.providers[pfx]) {
+        flags.provider = pfx;
+        flags.model = agentDef.model.slice(slash + 1);
+      } else {
+        flags.model = agentDef.model;
+      }
+    }
+  }
+
   const provider = resolveProvider(config, flags);
   const session = flags.session
     ? Session.load(config.dataDir, flags.session)
@@ -86,7 +113,9 @@ export async function runMain(flags: CliFlags) {
 
   try {
     await runTurn(config, provider, session, flags.prompt, emit, ctrl.signal, {
-      systemOverride: flags.system,
+      systemOverride:
+        flags.system ??
+        (agentDef ? `${buildSystemPrompt(config)}\n\nRole — you are the "${agentDef.name}" agent:\n${agentDef.body}` : undefined),
       permit: flags.allowOutside ? async () => true : undefined, // undefined → auto-deny
     });
     if (md) process.stdout.write(md.flush());

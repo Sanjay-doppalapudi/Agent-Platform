@@ -615,6 +615,16 @@ export async function replMain(flags: CliFlags) {
           continue;
         }
         case "agents": {
+          const { discoverAgents } = await import("./agents.ts");
+          const defs = discoverAgents(config);
+          if (defs.length) {
+            console.log(dim("defined agents (agent tool name:… / ap run --agent …):"));
+            for (const a of defs) {
+              console.log(`${cyan(a.name)} ${dim(`[${a.source}]`)}${a.model ? dim(` ${a.model}`) : ""} ${(a.description || "").slice(0, 70)}`);
+            }
+          } else {
+            console.log(dim("no agent profiles — add .ap/agents/<name>.md (frontmatter: description/model/tools; body = role)"));
+          }
           const subs = listSubagents();
           if (!subs.length) { console.log(dim("no subagents spawned this session")); continue; }
           for (const s of subs) {

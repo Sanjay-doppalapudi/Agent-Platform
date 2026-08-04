@@ -34,7 +34,7 @@ function selfCmd(): string[] {
 }
 
 export async function agentTool(
-  args: { task: string; cwd?: string; timeout?: number },
+  args: { task: string; name?: string; cwd?: string; timeout?: number },
   ctx: ToolCtx,
 ): Promise<string> {
   if (typeof args.task !== "string" || !args.task.trim()) {
@@ -43,9 +43,24 @@ export async function agentTool(
   const cwd = args.cwd ? resolvePath(args.cwd, ctx.cwd) : ctx.cwd;
   const timeoutMs = Math.min((args.timeout ?? 300) * 1000, 900_000);
 
+  // Named profile: validated HERE so a typo fails fast with the valid list
+  // instead of dying inside the child process.
+  let profileArgs: string[] = [];
+  if (args.name) {
+    const { discoverAgents } = await import("../agents.ts");
+    const defs = discoverAgents(ctx.config);
+    const def = defs.find((a) => a.name === String(args.name).toLowerCase());
+    if (!def) {
+      throw new ToolError(
+        `unknown agent profile "${args.name}" — available: ${defs.map((a) => a.name).join(", ") || "(none defined)"}`,
+      );
+    }
+    profileArgs = ["--agent", def.name];
+  }
+
   const info: SubagentInfo = {
     id: nextId++,
-    task: args.task.replace(/\s+/g, " ").slice(0, 100),
+    task: `${args.name ? `[${args.name}] ` : ""}${args.task.replace(/\s+/g, " ")}`.slice(0, 100),
     status: "running",
     steps: 0,
     startedAt: Date.now(),
@@ -54,7 +69,7 @@ export async function agentTool(
   ctx.subline?.(`◇ agent #${info.id} started: ${info.task.slice(0, 70)}`);
 
   const proc = Bun.spawn(
-    [...selfCmd(), "run", "-p", args.task, "--json", "--light", "--cwd", cwd],
+    [...selfCmd(), "run", "-p", args.task, "--json", "--light", "--cwd", cwd, ...profileArgs],
     { stdout: "pipe", stderr: "pipe", stdin: "ignore", windowsHide: true } as any,
   );
   // Child stderr is the only place startup-phase crashes surface — keep a tail.

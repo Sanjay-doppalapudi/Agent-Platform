@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./config.ts";
 import { shellPrefix } from "./tools/bash.ts";
+import { agentsPromptBlock, discoverAgents } from "./agents.ts";
 import { discoverSkills, skillsPromptBlock } from "./skills.ts";
 
 const MEMORY_CHAR_CAP = 2000;
@@ -34,6 +35,19 @@ function skillsForSession(config: Config): string {
   if (snap === undefined) {
     snap = skillsPromptBlock(discoverSkills(config));
     skillSnapshots.set(key, snap);
+  }
+  return snap;
+}
+
+// Named agent profiles — same per-session snapshot pattern.
+const agentSnapshots = new Map<string, string>();
+
+function agentsForSession(config: Config): string {
+  const key = `${config.dataDir}|${config.cwd}|${config.sessionId ?? ""}`;
+  let snap = agentSnapshots.get(key);
+  if (snap === undefined) {
+    snap = agentsPromptBlock(discoverAgents(config));
+    agentSnapshots.set(key, snap);
   }
   return snap;
 }
@@ -93,6 +107,7 @@ Memory: when the user corrects you or wants something different from what you di
     if (memories) prompt += `\n\nSaved user preferences:\n${memories}`;
 
     prompt += skillsForSession(config);
+    prompt += agentsForSession(config);
 
     if (config.sessionId) {
       const plansDir = join(tmpdir(), ".ap", config.sessionId);

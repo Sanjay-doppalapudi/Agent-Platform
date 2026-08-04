@@ -61,6 +61,9 @@ export interface Config {
   cwd: string;
   /** Set by the front-end once a session exists — scopes the plans folder. */
   sessionId?: string;
+  /** Programmatic tool whitelist (named agent profiles) — never from JSON.
+   *  Constant per process, so schema bytes stay stable for caching. */
+  toolFilter?: string[];
 }
 
 export interface ResolvedProvider {

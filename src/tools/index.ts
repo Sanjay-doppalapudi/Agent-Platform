@@ -151,6 +151,7 @@ export const TOOLS: ToolDef[] = [
       type: "object",
       properties: {
         task: { type: "string", description: "complete, self-contained task description" },
+        name: { type: "string", description: "named agent profile to run as (see Named agents)" },
         cwd: { type: "string" },
         timeout: { type: "number", description: "seconds, default 300" },
       },
@@ -318,11 +319,20 @@ const LIGHT_PLAN: ToolSchema[] = TOOLS.filter((t) => !t.fullOnly && t.readOnly).
 export const TOOL_SCHEMAS = FULL_CODE; // back-compat export
 
 export function toolSchemasFor(config: Config): ToolSchema[] {
-  if (config.light) return config.mode === "plan" ? LIGHT_PLAN : LIGHT_CODE;
-  if (config.mode === "plan") {
-    return dynamicSchemasPlan.length ? [...FULL_PLAN, ...dynamicSchemasPlan] : FULL_PLAN;
+  let set: ToolSchema[];
+  if (config.light) set = config.mode === "plan" ? LIGHT_PLAN : LIGHT_CODE;
+  else if (config.mode === "plan") {
+    set = dynamicSchemasPlan.length ? [...FULL_PLAN, ...dynamicSchemasPlan] : FULL_PLAN;
+  } else {
+    set = dynamicSchemasCode.length ? [...FULL_CODE, ...dynamicSchemasCode] : FULL_CODE;
   }
-  return dynamicSchemasCode.length ? [...FULL_CODE, ...dynamicSchemasCode] : FULL_CODE;
+  // Named-agent tool whitelist (constant per process → bytes stay stable).
+  if (config.toolFilter?.length) {
+    const allow = new Set(config.toolFilter.map(resolveToolName));
+    const filtered = set.filter((s) => allow.has(s.function.name));
+    if (filtered.length) set = filtered;
+  }
+  return set;
 }
 
 /** Safe to run concurrently (read-only tools + explicitly parallel-safe ones). */
