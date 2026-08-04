@@ -277,6 +277,44 @@ export async function replMain(flags: CliFlags) {
   // One-time contextual hints: teach a feature the first time it matters.
   const hinted = new Set<string>();
 
+  // Session spend for the status line. Pricing resolves lazily from the
+  // models.dev catalog AFTER the first turn (never on the startup path).
+  const spend = { prompt: 0, cached: 0, completion: 0 };
+  let pricing: import("./models.ts").Pricing | null = null;
+  let pricedFor = "";
+
+  const buildStatus = (): string => {
+    const parts: string[] = [dim(`${provider.name}/${provider.model}`)];
+    let chars = 0;
+    try {
+      chars = buildSystemPrompt(config).length;
+      for (const m of session.history) chars += JSON.stringify(m).length;
+    } catch {}
+    const pct = Math.min(999, Math.round((chars / config.contextBudgetChars) * 100));
+    parts.push(pct >= 85 ? red(`ctx ${pct}%`) : pct >= 60 ? yellow(`ctx ${pct}%`) : dim(`ctx ${pct}%`));
+    if (pricing && (spend.prompt || spend.completion)) {
+      const usd =
+        ((spend.prompt - spend.cached) * pricing.input +
+          spend.cached * (pricing.cacheRead ?? pricing.input) +
+          spend.completion * pricing.output) / 1e6;
+      if (usd > 0) parts.push(dim(`~$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(3)}`));
+    }
+    const subs = listSubagents();
+    if (subs.length) {
+      const dots = subs.slice(-8).map((s) =>
+        s.status === "running" ? yellow("●") : s.status === "done" ? green("●") : red("●")).join("");
+      parts.push(`${dim(`◇ ${subs.length}`)} ${dots} ${dim("/agents")}`);
+    }
+    return `  ${parts.join(dim(" · "))}`;
+  };
+  // Re-evaluated per keypress render — memoized so typing costs nothing.
+  let statusCache = { at: 0, s: "" };
+  const statusFor = (): string => {
+    const now = performance.now();
+    if (now - statusCache.at > 1000) statusCache = { at: now, s: buildStatus() };
+    return statusCache.s;
+  };
+
   // Sandbox permission state: session-scoped "always allow" keys and a
   // promise chain so parallel tools never show two prompts at once.
   let sessionAllows = new Set<string>();
@@ -391,6 +429,7 @@ export async function replMain(flags: CliFlags) {
           .map((f) => f.replace(/\\/g, "/"));
       },
       onCtrlO: () => toggleVerbose(true),
+      status: config.light ? undefined : statusFor,
     }))?.trim();
 
     if (input === null || input === undefined) exit(0);
@@ -416,6 +455,7 @@ export async function replMain(flags: CliFlags) {
           session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
           config.sessionId = session.id;
           sessionAllows = new Set();
+          spend.prompt = spend.cached = spend.completion = 0;
           cp = new Checkpoints(config, session.id);
           console.log(dim(`new session ${session.id}`));
           continue;
@@ -424,6 +464,7 @@ export async function replMain(flags: CliFlags) {
             session = Session.load(config.dataDir, rest[0] ?? "");
             config.sessionId = session.id;
             sessionAllows = new Set();
+            spend.prompt = spend.cached = spend.completion = 0;
             cp = new Checkpoints(config, session.id);
             console.log(dim(`resumed ${session.id} (${session.history.length} msgs)`));
           } catch (e) { console.log(dim((e as Error).message)); }
@@ -660,6 +701,7 @@ export async function replMain(flags: CliFlags) {
             session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
             config.sessionId = session.id;
             sessionAllows = new Set();
+            spend.prompt = spend.cached = spend.completion = 0;
             cp = new Checkpoints(config, session.id);
             session.append({ role: "user", content: `[Compacted context from session ${old}]\n${summary.trim()}` });
             session.append({ role: "assistant", content: "Context loaded — continuing from the summary." });
@@ -784,6 +826,9 @@ export async function replMain(flags: CliFlags) {
           totals.prompt += e.usage.prompt;
           totals.cached += e.usage.cached ?? 0;
           totals.completion += e.usage.completion;
+          spend.prompt += e.usage.prompt;
+          spend.cached += e.usage.cached ?? 0;
+          spend.completion += e.usage.completion;
         }
       }
 
@@ -818,6 +863,18 @@ export async function replMain(flags: CliFlags) {
       spinner.stop();
       ctrl = null;
       turnT0 = 0;
+      // Resolve pricing for the current model in the background (disk-cached
+      // catalog; re-resolves only after a model switch).
+      const modelKey = `${provider.name}/${provider.model}`;
+      if (!config.light && pricedFor !== modelKey) {
+        pricedFor = modelKey;
+        pricing = null;
+        import("./models.ts")
+          .then(async ({ loadCatalog, modelPricing }) => {
+            pricing = modelPricing(await loadCatalog(config.dataDir), provider.name, provider.model);
+          })
+          .catch(() => {});
+      }
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       const cached = totals.cached ? ` (${totals.cached} cached)` : "";
       // Context drift belongs on the line people already read after each turn.

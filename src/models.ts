@@ -16,7 +16,7 @@ export interface CatalogProvider {
   doc?: string;
   models: Record<string, {
     name?: string;
-    cost?: { input?: number; output?: number };
+    cost?: { input?: number; output?: number; cache_read?: number };
     limit?: { context?: number; output?: number };
   }>;
 }
@@ -71,6 +71,34 @@ export function searchModels(catalog: Catalog, query: string, limit = 30): Model
     }
   }
   return rows;
+}
+
+export interface Pricing { input: number; output: number; cacheRead?: number }
+
+/**
+ * $/M-token pricing for a model. Exact provider match first; gateways and
+ * proxies (not in the db under their own name) fall back to ANY provider
+ * listing the same model id — prices for the same model rarely differ much,
+ * and the result is labeled approximate everywhere it is shown.
+ */
+export function modelPricing(catalog: Catalog, provider: string, model: string): Pricing | null {
+  const short = model.split("/").pop()!; // proxy ids like "anthropic/claude-x"
+  const probe = (prov?: CatalogProvider): Pricing | null => {
+    for (const id of [model, short]) {
+      const c = prov?.models?.[id]?.cost;
+      if (c?.input != null && c.output != null) {
+        return { input: c.input, output: c.output, cacheRead: c.cache_read };
+      }
+    }
+    return null;
+  };
+  const exact = probe(catalog[provider]);
+  if (exact) return exact;
+  for (const prov of Object.values(catalog)) {
+    const hit = probe(prov);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 /**

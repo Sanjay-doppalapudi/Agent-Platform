@@ -61,6 +61,10 @@ export function readLine(opts: {
   /** Lazy workspace file list for @-completion (called once, cached). */
   files?: () => string[];
   onCtrlO?: () => void;
+  /** Status row rendered below the input line (may contain ANSI colors).
+   *  A function is re-evaluated on every render (memoize if costly).
+   *  Hidden while a menu is open; cleared from the transcript on submit. */
+  status?: string | (() => string);
 }): Promise<string | null> {
   const { prompt, commands, history } = opts;
   const promptLen = stripAnsi(prompt).length;
@@ -132,6 +136,13 @@ export function readLine(opts: {
         if (end < items.length) { out += `\n${DIM}  ↓ ${items.length - end} more${R}`; rows++; }
         out += `\n${DIM}  ↑↓ move · Tab complete · Enter run · Esc close${R}`; rows++;
         out += `\x1b[${rows}A\r\x1b[${promptLen + buf.length}C`;
+      } else if (opts.status) {
+        // Status row below the input; cursor returns wrap-aware.
+        const st = typeof opts.status === "function" ? opts.status() : opts.status;
+        const cols = Math.max(process.stdout.columns ?? 80, 20);
+        const len = stripAnsi(st).length;
+        const rows = 1 + Math.floor(Math.max(0, len - 1) / cols);
+        out += `\n${st}\x1b[${rows}A\r\x1b[${promptLen + buf.length}C`;
       }
       process.stdout.write(out);
     };
