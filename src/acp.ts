@@ -11,7 +11,7 @@
 import { loadConfig, resolveProvider, type Config, type McpServerSpec, type ResolvedProvider } from "./config.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
 import { Checkpoints } from "./checkpoint.ts";
-import { initMcp } from "./mcp.ts";
+import { initMcp, mcpStatus } from "./mcp.ts";
 import { Session } from "./session.ts";
 import { getTool } from "./tools/index.ts";
 import { toolLabel } from "./ui.ts";
@@ -27,6 +27,21 @@ interface AcpLive {
   ctrl: AbortController | null;
   chain: Promise<unknown>; // one prompt at a time per session
 }
+
+// Slash commands advertised to the editor (available_commands_update).
+// Zed blocks any command NOT in this list client-side, so this is the
+// complete surface; invocations arrive as session/prompt text "/name args".
+const SLASH_COMMANDS = [
+  { name: "plan", description: "Read-only mode: explore and produce a plan" },
+  { name: "code", description: "Full mode: all tools (default)" },
+  { name: "model", description: "Switch model, or provider/model", input: { hint: "provider/model" } },
+  { name: "undo", description: "Restore the previous checkpoint" },
+  { name: "diff", description: "Diff of the last checkpoint (+ pending changes)" },
+  { name: "checkpoints", description: "List workspace checkpoints" },
+  { name: "mcp", description: "List MCP servers and their tools" },
+  { name: "skills", description: "List available SKILL.md packs" },
+  { name: "context", description: "Show session context usage" },
+];
 
 // AgentEvent tool name → ACP ToolKind (drives the editor's icon).
 const TOOL_KIND: Record<string, string> = {
@@ -71,6 +86,59 @@ function acpMcpSpecs(list: any[]): Record<string, McpServerSpec> {
   return out;
 }
 
+/** Execute an advertised slash command against a live session. */
+async function runCommand(live: AcpLive, name: string, arg: string): Promise<string> {
+  switch (name) {
+    case "plan":
+    case "code":
+      live.config.mode = name;
+      return `mode: ${name}${name === "plan" ? " — read-only tools, mutations blocked" : " — all tools"}`;
+    case "model": {
+      if (!arg) return `current model: ${live.provider.name}/${live.provider.model}`;
+      const slash = arg.indexOf("/");
+      const prov = slash > 0 ? arg.slice(0, slash) : "";
+      if (prov && live.config.providers[prov]) {
+        live.provider = resolveProvider({ ...live.config, provider: prov }, { model: arg.slice(slash + 1) } as CliFlags);
+      } else {
+        live.provider = { ...live.provider, model: arg };
+      }
+      return `model: ${live.provider.name}/${live.provider.model}`;
+    }
+    case "undo": {
+      const cps = live.cp.list(2);
+      if (cps.length < 2) return "no earlier checkpoint to restore";
+      const r = live.cp.restore(cps[1]!.hash);
+      return r ? `restored checkpoint ${cps[1]!.hash} (${cps[1]!.label})` : "restore failed";
+    }
+    case "diff":
+      return live.cp.available() ? live.cp.diff(1, 20_000) : "(checkpoints unavailable)";
+    case "checkpoints": {
+      const cps = live.cp.list();
+      return cps.length ? cps.map((c) => `${c.hash}  ${c.label}`).join("\n") : "no checkpoints yet";
+    }
+    case "mcp": {
+      const st = mcpStatus();
+      if (!st.length) return "no MCP servers connected — configure them in .mcp.json or ap.config.json";
+      return st.map((s) =>
+        `${s.ok ? "✓" : "✗"} ${s.name} [${s.transport}] ${s.ok ? `· ${s.tools.length} tools: ${s.tools.map((t) => t.name).join(", ").slice(0, 200)}` : `· ${s.error}`}`,
+      ).join("\n");
+    }
+    case "skills": {
+      const { discoverSkills } = await import("./skills.ts");
+      const sk = discoverSkills(live.config);
+      return sk.length
+        ? sk.map((s) => `${s.name} [${s.source}] ${s.description.slice(0, 80)}`).join("\n")
+        : "no skills installed — ap skills add <owner>/<repo>";
+    }
+    case "context": {
+      const chars = live.session.history.reduce((n, m) => n + JSON.stringify(m).length, 0);
+      return `messages: ${live.session.history.length} · ~${Math.round(chars / 4)} tokens (${chars} chars) · trim budget ${live.config.contextBudgetChars} chars`;
+    }
+    default:
+      return `unknown command: /${name}`;
+  }
+}
+
 export async function acpMain(flags: CliFlags) {
   const sessions = new Map<string, AcpLive>();
   const log = (m: string) => process.stderr.write(`[acp] ${m}\n`);
@@ -103,6 +171,8 @@ export async function acpMain(flags: CliFlags) {
       { id: "plan", name: "Plan", description: "Read-only tools — explore and produce a plan" },
     ],
   });
+  const advertiseCommands = (sessionId: string) =>
+    update(sessionId, { sessionUpdate: "available_commands_update", availableCommands: SLASH_COMMANDS });
 
   const handle = async (msg: any) => {
     // Response to one of OUR requests (permission dialogs).
@@ -150,6 +220,7 @@ export async function acpMain(flags: CliFlags) {
           });
           log(`session ${session.id} · ${provider.name}/${provider.model} · ${config.cwd}`);
           respond(id, { sessionId: session.id, modes: modesFor(config) });
+          advertiseCommands(session.id);
           return;
         }
         case "session/load": {
@@ -173,6 +244,7 @@ export async function acpMain(flags: CliFlags) {
             }
           }
           respond(id, { modes: modesFor(config) });
+          advertiseCommands(session.id);
           return;
         }
         case "session/set_mode": {
@@ -180,8 +252,10 @@ export async function acpMain(flags: CliFlags) {
           if (!live) { respondErr(id, -32602, `unknown session: ${params?.sessionId}`); return; }
           if (params?.modeId === "plan" || params?.modeId === "code") {
             live.config.mode = params.modeId;
+            // Result must be an OBJECT — Zed's client rejects null and
+            // reverts the mode picker on deserialization failure.
+            respond(id, {});
             update(live.session.id, { sessionUpdate: "current_mode_update", currentModeId: params.modeId });
-            respond(id, null);
           } else {
             respondErr(id, -32602, `unknown mode: ${params?.modeId}`);
           }
@@ -192,6 +266,19 @@ export async function acpMain(flags: CliFlags) {
           if (!live) { respondErr(id, -32602, `unknown session: ${params?.sessionId}`); return; }
           const text = flattenPrompt(params?.prompt);
           if (!text) { respond(id, { stopReason: "end_turn" }); return; }
+
+          // Advertised slash commands arrive as prompt text — handle locally,
+          // no model round-trip.
+          const cmd = text.match(/^\/([a-z]+)\s*([\s\S]*)$/);
+          if (cmd && SLASH_COMMANDS.some((c) => c.name === cmd[1])) {
+            const result = await runCommand(live, cmd[1]!, cmd[2]!.trim());
+            update(live.session.id, { sessionUpdate: "agent_message_chunk", content: { type: "text", text: result } });
+            if (cmd[1] === "plan" || cmd[1] === "code") {
+              update(live.session.id, { sessionUpdate: "current_mode_update", currentModeId: cmd[1] });
+            }
+            respond(id, { stopReason: "end_turn" });
+            return;
+          }
 
           const run = live.chain.then(async () => {
             const ctrl = new AbortController();
