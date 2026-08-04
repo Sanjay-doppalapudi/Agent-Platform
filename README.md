@@ -147,7 +147,7 @@ Weaker-model tolerance: tool names (`search`→grep, `create`→write, …) and 
 - **Subagents**: the `agent` tool delegates independent subtasks to parallel child processes (`ap run --light` under the hood — children can't recurse). Live nested `↳` progress lines stream in, and `/agents` lists every subagent with status, steps, and duration.
 - **Custom slash commands**: drop `.ap/commands/<name>.md` in a repo (or `<dataDir>/commands/`) — `/name args` expands the file as your message with `$ARGS` substitution; appears in the `/` menu automatically.
 - **`@file` mentions**: `@src/foo.ts` in a message inlines the file (8KB cap) — saves the model a read turn.
-- **Hooks**: config `hooks.preBash/preWrite/preEdit` (nonzero exit blocks the tool with the hook's output) and `hooks.afterEdit` (e.g. `bun x tsc --noEmit` — failures are fed back so the model fixes them itself, max 2 rounds/turn).
+- **Hooks**: config `hooks.preBash/preWrite/preEdit` (nonzero exit blocks the tool with the hook's output) and `hooks.afterEdit` (e.g. `bun x tsc --noEmit` — failures are fed back so the model fixes them itself, max 2 rounds/turn). **Lifecycle hooks**: `hooks.onDone` / `hooks.onError` fire when a turn finishes — either a shell command (JSON payload in `AP_PAYLOAD`, event name in `AP_EVENT`) or an `http(s)://` URL that receives a JSON POST (`{event, sessionId, cwd, text|message}`). Fire-and-forget: they never block or fail the turn (run/loop drain them before exiting so they always deliver). Notify Slack, kick a build, chain another `ap run` — anything that should happen "when the chat finishes".
 - **`websearch` tool**: web search via DuckDuckGo's HTML endpoint (plain fetch, no API key) — titles, URLs, snippets. **`fetch` tool**: URL → readable text (50KB cap); `render:true` runs the page through your *installed* Chrome/Edge headless (`--dump-dom`, ~300ms, nothing bundled) so JS-rendered pages work — falls back to plain fetch if no browser is found. **`todo` tool**: session checklist rendered live in the transcript.
 - **`/worktree new <slug> | list | back | merge <slug>`**: isolated git worktree + `ap/<slug>` branch per task — parallel work never collides.
 - **`/compact`**: summarizes the session into a fresh one when context grows.
@@ -206,6 +206,18 @@ Engineering notes: servers connect **lazily before the first turn** (never on th
 ## Sessions (no database)
 
 Each session is one append-only JSONL file in `<dataDir>/sessions/<id>.jsonl` — a `meta` line, then one line per message, flushed on every append. Crash-safe (torn last line ignored), resumable (`-c`, `--resume <id>`, `/resume`), greppable, and deleted by deleting the file.
+
+## Zed / editors — ACP (Agent Client Protocol)
+
+`ap acp` speaks [ACP](https://agentclientprotocol.com) v1 over stdio, so AP runs **inside Zed** (and any ACP editor) as a first-class agent. It's the same event stream, rendered differently: text → message chunks, reasoning → thought chunks, tool calls → live tool-call cards with the right icons, **sandbox permission requests → native editor dialogs**, plan/code → ACP session modes (switchable from the editor's mode picker), cancel → clean turn abort, and sessions persist (`loadSession`). MCP servers configured in the editor are passed straight through to AP's own MCP client.
+
+Zed `settings.json`:
+
+```json
+{ "agent_servers": { "AP": { "command": "ap", "args": ["acp"] } } }
+```
+
+Then open the Agent Panel and pick **AP**. Provider/model flags carry through: `"args": ["acp", "--provider", "openrouter", "-m", "deepseek-v4-pro"]`.
 
 ## Server API (for programmatic drivers)
 

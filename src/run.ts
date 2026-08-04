@@ -1,7 +1,7 @@
 // One-shot headless mode: `ap run -p "task" [--json]`
 // --json → one AgentEvent per line (NDJSON) on stdout.
 import { loadConfig, resolveProvider } from "./config.ts";
-import { runTurn, type AgentEvent } from "./agent.ts";
+import { lifecycleSettled, runTurn, type AgentEvent } from "./agent.ts";
 import { Checkpoints } from "./checkpoint.ts";
 import { initMcp } from "./mcp.ts";
 import { getTool } from "./tools/index.ts";
@@ -95,10 +95,12 @@ export async function runMain(flags: CliFlags) {
       }
     }
     if (!json) process.stdout.write("\n");
+    await lifecycleSettled();
     process.exit(0);
   } catch (e) {
     if (!json) console.error(`\nfailed: ${(e as Error).message}`);
     else process.stdout.write(JSON.stringify({ type: "error", message: (e as Error).message, retryable: false }) + "\n");
+    await lifecycleSettled();
     process.exit(1);
   }
 }

@@ -16,7 +16,7 @@
 //   - checkpoint per mutating iteration → /undo-able audit trail
 import { loadConfig, resolveProvider } from "./config.ts";
 import { initMcp } from "./mcp.ts";
-import { runTurn, type AgentEvent } from "./agent.ts";
+import { lifecycleSettled, runTurn, type AgentEvent } from "./agent.ts";
 import { Checkpoints } from "./checkpoint.ts";
 import { getTool } from "./tools/index.ts";
 import { shellPrefix } from "./tools/bash.ts";
@@ -155,6 +155,7 @@ export async function loopMain(flags: CliFlags) {
       if (maxIter > 0 && iter > maxIter) {
         status(`stopped: --max ${maxIter} iterations reached (goal not verified)`);
         showChanges(loopStart, "total");
+        await lifecycleSettled();
         process.exit(2);
       }
       const iterStart = cp.available() ? cp.head() : null;
@@ -166,6 +167,7 @@ export async function loopMain(flags: CliFlags) {
       if (blocked && !work.mutated) {
         status(`stopped: goal not applicable — ${blocked[1]?.trim() || "see output above"}`);
         showChanges(loopStart, "total");
+        await lifecycleSettled();
         process.exit(3);
       }
 
@@ -201,6 +203,7 @@ export async function loopMain(flags: CliFlags) {
       if (auditBlocked && !audit.mutated) {
         status(`stopped: goal not applicable — ${auditBlocked[1]?.trim() || "see output above"}`);
         showChanges(loopStart, "total");
+        await lifecycleSettled();
         process.exit(3);
       }
 
@@ -225,6 +228,7 @@ export async function loopMain(flags: CliFlags) {
       if (sameAuditStreak >= 2) {
         status(`stopped: stalled — the same unmet items repeated ${sameAuditStreak + 1}× with no progress. Remaining:\n${audit.text.trim()}`);
         showChanges(loopStart, "total");
+        await lifecycleSettled();
         process.exit(2);
       }
 

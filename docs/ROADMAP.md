@@ -53,7 +53,7 @@ Legend: **P0** build next · **P1** valuable, after P0 · **P2** someday · **Sk
 - **MCP client** (everyone has it): stdio JSON-RPC is doable dependency-free (~250 lines), but each MCP server the user adds costs prompt tokens and startup spawns — gate hard behind config; connect lazily on first use.
 - **ACP editor embedding** (Grok Build): our `ap serve` API is already close; map to ACP when an editor actually asks for it.
 - **Session sharing** (opencode): reuse the plan-HTML exporter to render a whole session transcript to a self-contained HTML file (`/share` → file, user hosts it however they like). ~40 lines, could promote to P1.
-- **Cron/scheduled runs** (Hermes, Cline): Windows Task Scheduler / cron invoke `ap run` already — document the pattern instead of building a scheduler.
+- **Cron/scheduled runs**: CUT (decided 2026-08): no scheduler will be built — the OS scheduler (Task Scheduler / cron) invoking `ap run -p … --json` is the supported pattern.
 - **Skill self-improvement loop** (Hermes): our memory system is the seed; a "promote memory → command template" step could come later.
 
 ### Skip (with reasons)

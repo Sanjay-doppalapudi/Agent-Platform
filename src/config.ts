@@ -41,7 +41,9 @@ export interface Config {
   /** Shadow-repo checkpoints after mutating turns (off in light profile). */
   checkpoints: "on" | "off";
   /** Shell hooks: preBash/preWrite/preEdit (nonzero exit blocks the tool),
-   *  afterEdit (nonzero output is fed back to the model to self-fix). */
+   *  afterEdit (nonzero output is fed back to the model to self-fix).
+   *  Lifecycle: onDone/onError — a shell command (AP_EVENT/AP_PAYLOAD env)
+   *  or an http(s) URL that receives a JSON POST; fire-and-forget. */
   hooks?: Record<string, string>;
   /** MCP servers (name → spec) — merged with a project .mcp.json. Full
    *  profile only; connected lazily before the first turn, never at startup. */

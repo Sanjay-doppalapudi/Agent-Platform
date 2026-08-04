@@ -44,6 +44,55 @@ function runHook(cmd: string, cwd: string, tool: string, argsJson: string): { ok
   }
 }
 
+/** Fire-and-forget lifecycle hook: config `hooks.onDone` / `hooks.onError` is
+ * either a shell command (payload in AP_EVENT / AP_PAYLOAD env) or an http(s)
+ * URL that gets a JSON POST. Never blocks or fails the turn. */
+const pendingLifecycle = new Set<Promise<unknown>>();
+
+function fireLifecycle(config: Config, name: "onDone" | "onError", payload: Record<string, unknown>) {
+  const spec = config.light ? undefined : config.hooks?.[name];
+  if (!spec) return;
+  const body = JSON.stringify({ event: name, ...payload });
+  let p: Promise<unknown> | null = null;
+  try {
+    if (/^https?:\/\//i.test(spec)) {
+      p = fetch(spec, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        signal: AbortSignal.timeout(10_000),
+      }).catch(() => {});
+    } else {
+      const proc = Bun.spawn(
+        process.platform === "win32" ? ["cmd", "/c", spec] : ["sh", "-c", spec],
+        {
+          cwd: config.cwd,
+          env: { ...process.env, AP_EVENT: name, AP_PAYLOAD: body.slice(0, 8000) },
+          stdin: "ignore",
+          stdout: "ignore",
+          stderr: "ignore",
+          windowsHide: true,
+        } as any,
+      );
+      p = proc.exited.catch(() => {});
+    }
+  } catch {}
+  if (p) {
+    pendingLifecycle.add(p);
+    p.finally(() => pendingLifecycle.delete(p!));
+  }
+}
+
+/** Drain outstanding lifecycle hooks (capped). run/loop call this before
+ * process.exit — on Windows, children of an exiting parent are killed. */
+export async function lifecycleSettled(maxWaitMs = 10_000): Promise<void> {
+  if (!pendingLifecycle.size) return;
+  await Promise.race([
+    Promise.allSettled([...pendingLifecycle]),
+    new Promise((r) => setTimeout(r, maxWaitMs)),
+  ]);
+}
+
 export interface RunOptions {
   extra?: Record<string, unknown>; // passthrough body fields (e.g. response_format)
   systemOverride?: string;
@@ -96,6 +145,7 @@ export async function runTurn(
         continue;
       }
       emit({ type: "error", message: pe.message, retryable: pe.retryable ?? false });
+      fireLifecycle(config, "onError", { sessionId: session.id, cwd: config.cwd, message: pe.message });
       throw e;
     }
 
@@ -109,6 +159,7 @@ export async function runTurn(
 
     if (res.toolCalls.length === 0) {
       emit({ type: "done", sessionId: session.id, text: finalText });
+      fireLifecycle(config, "onDone", { sessionId: session.id, cwd: config.cwd, text: finalText.slice(0, 4000) });
       return finalText;
     }
 
@@ -214,6 +265,7 @@ export async function runTurn(
   session.append({ role: "user", content: "[max iterations reached — stop and summarize]" });
   emit({ type: "error", message: `max iterations (${config.maxIterations}) reached`, retryable: false });
   emit({ type: "done", sessionId: session.id, text: finalText });
+  fireLifecycle(config, "onDone", { sessionId: session.id, cwd: config.cwd, text: finalText.slice(0, 4000), reason: "max_iterations" });
   return finalText;
 }
 

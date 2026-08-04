@@ -147,6 +147,21 @@ const HELP_TOPICS: Record<string, string> = {
   GET  /session/:id/events                → SSE stream of AgentEvents
   GET  /health · GET /session/:id/messages · DELETE /session/:id`,
 
+  acp: `ap acp — Agent Client Protocol server (Zed and other ACP editors)
+
+  Speaks ACP v1 over stdio: the editor spawns ap and drives it; AP streams
+  message / thought / tool-call updates back live. Sandbox permission
+  requests appear as native permission dialogs in the editor, plan/code are
+  exposed as ACP session modes, sessions persist (loadSession supported),
+  and MCP servers configured in the editor are passed through to AP's own
+  MCP client. Editor "cancel" aborts the turn cleanly.
+
+  Zed — add to settings.json, then open the Agent Panel and pick "AP":
+    { "agent_servers": { "AP": { "command": "ap", "args": ["acp"] } } }
+
+  Flags carry through: ap acp --provider x -m model --light etc.
+  Hooks fire here too (hooks.onDone/onError — command or webhook URL).`,
+
   sessions: `ap sessions — list · ap sessions search <q> — ripgrep transcripts
   ap resume — interactive picker · ap -c — resume most recent
   Sessions are append-only JSONL in <dataDir>/sessions/<id>.jsonl.`,
@@ -166,6 +181,7 @@ Usage:
   ap run -p "task"         one-shot run (--json for NDJSON events)
   ap loop -p "goal"        loop work→verify until the goal is verifiably done
   ap serve [--port 4141]   HTTP server mode (sessions + SSE)
+  ap acp                   ACP agent for editors (Zed): stdio, modes, permissions
   ap skills [add|remove]   list/install SKILL.md packs (skills.sh compatible)
   ap mcp [add|call|...]    connect MCP servers — their tools become agent tools
   ap models [query]        search the models.dev catalog (context + prices)
@@ -389,6 +405,11 @@ Example:  ap mcp add fs bun x @modelcontextprotocol/server-filesystem .`);
   case "serve": {
     const { serveMain } = await import("./server.ts");
     await serveMain(flags);
+    break;
+  }
+  case "acp": {
+    const { acpMain } = await import("./acp.ts");
+    await acpMain(flags);
     break;
   }
   case "tool": {
