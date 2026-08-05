@@ -56,7 +56,7 @@ function rowsUp(s: string): number {
 const BUILTIN_CMDS = new Set([
   "exit", "q", "quit", "new", "resume", "session", "sessions", "sandbox",
   "model", "models", "mode", "plan", "code", "system", "context", "agents", "effort",
-  "undo", "diff", "checkpoints", "restore", "worktree", "compact", "share", "ps",
+  "undo", "diff", "checkpoints", "restore", "worktree", "compact", "share", "ps", "commit",
 ]);
 
 const COMMANDS: SlashCommand[] = [
@@ -78,6 +78,7 @@ const COMMANDS: SlashCommand[] = [
   { name: "/checkpoints", desc: "list workspace checkpoints" },
   { name: "/restore", desc: "restore a checkpoint by hash", hasArg: true },
   { name: "/worktree", desc: "new <slug> | list | back | merge <slug>", hasArg: true },
+  { name: "/commit", desc: "stage all + commit with a drafted message (never pushes)", hasArg: true },
   { name: "/compact", desc: "summarize history into a fresh session" },
   { name: "/share", desc: "export the transcript as one self-contained HTML file" },
   { name: "/system", desc: "show the system prompt" },
@@ -325,6 +326,21 @@ export async function replMain(flags: CliFlags) {
     if (now - statusCache.at > 1000) statusCache = { at: now, s: buildStatus() };
     return statusCache.s;
   };
+
+  /** One keypress from `keys` (Enter/Esc/ctrl+c → the last key = the safe no). */
+  const readKey = (keys: string[]): Promise<string> =>
+    new Promise((res) => {
+      const no = keys[keys.length - 1]!;
+      const onKey = (_s: string, key: any) => {
+        if (!key) return;
+        const done = (v: string) => { process.stdin.removeListener("keypress", onKey); res(v); };
+        if (key.ctrl && key.name === "c") return done(no);
+        if (key.ctrl) return;
+        if (key.name === "return" || key.name === "enter" || key.name === "escape") return done(no);
+        if (keys.includes(key.name)) return done(key.name);
+      };
+      process.stdin.on("keypress", onKey);
+    });
 
   // Summarize the session into a fresh one (manual /compact + auto-compact).
   const compactNow = async (): Promise<boolean> => {
@@ -788,6 +804,58 @@ export async function replMain(flags: CliFlags) {
         case "compact": {
           if (session.history.length < 4) { console.log(dim("nothing worth compacting yet")); continue; }
           await compactNow();
+          continue;
+        }
+        case "commit": {
+          const { gitState, workingDiff, diffForPrompt, cleanCommitMessage, createBranch, commitAll, slugifyBranch } =
+            await import("./git.ts");
+          const st = gitState(config);
+          if (!st.repo) { console.log(dim("not a git repository")); continue; }
+          if (!st.dirty.length) { console.log(dim("nothing to commit — working tree clean")); continue; }
+
+          // Protected branch: offer a feature branch instead of committing to it.
+          if (st.protectedBranch) {
+            console.log(dim(`on protected branch "${st.branch}" — AP won't commit here directly.`));
+            process.stdout.write(dim(`create branch ${slugifyBranch(rest.join(" ") || history[history.length - 2] || "work")} and commit there? [y/N] `));
+            const ans = await readKey(["y", "n"]);
+            console.log(dim(ans === "y" ? "yes" : "no"));
+            if (ans !== "y") { console.log(dim("aborted — switch branches yourself, then /commit")); continue; }
+            const name = slugifyBranch(rest.join(" ") || history[history.length - 2] || "work");
+            const b = createBranch(config, name);
+            if (!b.ok) { console.log(dim(`branch failed: ${b.out.slice(0, 200)}`)); continue; }
+            console.log(dim(`branch → ${name}`));
+          }
+
+          // Message: explicit argument wins; otherwise the model drafts one.
+          let msg = rest.join(" ").trim();
+          if (!msg) {
+            spinner.start("drafting commit message…");
+            try {
+              const diff = diffForPrompt(workingDiff(config));
+              let draft = "";
+              await streamChat(
+                provider,
+                [
+                  { role: "system", content: "Write a git commit message for this diff. One imperative subject line under 72 chars (no period, no type prefix unless the repo clearly uses one), then an optional short body explaining WHY. Output only the message." },
+                  { role: "user", content: diff || `Files changed:\n${st.dirty.join("\n")}` },
+                ],
+                [], (d) => { draft += d; }, undefined, undefined, undefined, config.streamIdleSeconds * 1000,
+              );
+              msg = cleanCommitMessage(draft);
+            } catch (e) {
+              console.log(dim(`draft failed: ${(e as Error).message}`));
+            } finally { spinner.stop(); }
+          }
+          if (!msg) { console.log(dim("no message — /commit <your message> to write one yourself")); continue; }
+
+          console.log(dim(`${st.dirty.length} file${st.dirty.length === 1 ? "" : "s"} · branch ${gitState(config).branch}`));
+          for (const l of msg.split("\n")) console.log(l ? `  ${l}` : "");
+          process.stdout.write(dim("commit this? [y/N] "));
+          const ok = await readKey(["y", "n"]);
+          console.log(dim(ok === "y" ? "yes" : "no"));
+          if (ok !== "y") { console.log(dim("aborted — nothing committed")); continue; }
+          const r = commitAll(config, msg);
+          console.log(dim(r.ok ? `committed ${r.out} (not pushed — push yourself when ready)` : `commit failed: ${r.out.slice(0, 300)}`));
           continue;
         }
         case "share": {
