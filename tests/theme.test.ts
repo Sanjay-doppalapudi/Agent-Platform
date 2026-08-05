@@ -1,6 +1,65 @@
 // Themes + input frame geometry (pure string work — no terminal needed).
 import { describe, expect, test } from "bun:test";
-import { currentTheme, frameBottom, frameTop, frameWidth, paint, setTheme, THEMES, themeNames } from "../src/theme.ts";
+import { currentTheme, EFFORT_LEVELS, frameBottom, frameTop, frameWidth, paint, parseEffort, setTheme, THEMES, themeNames } from "../src/theme.ts";
+
+describe("frameBottom color integrity (regression)", () => {
+  // The bottom edge lost its color partway across: wrapping the WHOLE line in
+  // a border color let a reset inside the status kill it, so the trailing
+  // "───╯" rendered in the terminal default (looked white).
+  const border = (s: string) => `\x1b[2;36m${s}\x1b[0m`;
+  const status = `\x1b[2mmodel\x1b[0m \x1b[33mctx 62%\x1b[0m`;
+
+  test("border color is re-applied after the status, not inherited through it", () => {
+    const out = frameBottom(60, status, border);
+    // The closing run must open AFTER the status (so the status's own resets
+    // cannot kill it) and must not be reset again before the corner.
+    const openedAt = out.lastIndexOf("\x1b[2;36m");
+    expect(openedAt).toBeGreaterThan(out.indexOf("ctx 62%"));
+    const closingRun = out.slice(openedAt, out.lastIndexOf("╯"));
+    expect(closingRun).not.toContain("\x1b[0m");
+  });
+
+  test("the closing corner is inside a colored run", () => {
+    const out = frameBottom(60, status, border);
+    const lastOpen = out.lastIndexOf("\x1b[2;36m");
+    const lastReset = out.lastIndexOf("\x1b[0m");
+    expect(lastOpen).toBeLessThan(out.lastIndexOf("╯"));
+    expect(lastReset).toBeGreaterThan(out.lastIndexOf("╯")); // reset comes after the corner
+  });
+
+  test("visible width is unaffected by the painter", () => {
+    const plain = frameBottom(60, "model ctx 62%");
+    const painted = frameBottom(60, "model ctx 62%", border);
+    const vis = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+    expect(vis(painted)).toBe(vis(plain));
+    expect(vis(painted).length).toBe(60);
+  });
+
+  test("empty status still paints the whole closed edge", () => {
+    const out = frameBottom(20, "", border);
+    expect(out.startsWith("\x1b[2;36m╰")).toBe(true);
+    expect(out).toContain("╯\x1b[0m");
+  });
+});
+
+describe("parseEffort", () => {
+  test("canonical levels", () => {
+    for (const l of EFFORT_LEVELS) expect(parseEffort(l)).toBe(l);
+  });
+  test("aliases people actually type", () => {
+    expect(parseEffort("max")).toBe("high");     // reported by a user
+    expect(parseEffort("MAX")).toBe("high");
+    expect(parseEffort("med")).toBe("medium");
+    expect(parseEffort("min")).toBe("minimal");
+  });
+  test("off/default/none all disable", () => {
+    for (const a of ["off", "default", "none", "auto"]) expect(parseEffort(a)).toBe("off");
+  });
+  test("garbage is rejected, not silently coerced", () => {
+    expect(parseEffort("turbo")).toBeNull();
+    expect(parseEffort("")).toBeNull();
+  });
+});
 
 const visible = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 

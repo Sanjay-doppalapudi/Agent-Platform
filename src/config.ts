@@ -52,7 +52,7 @@ export interface Config {
   autoCompact: "on" | "off";
   /** Default reasoning effort sent as `reasoning_effort` (models that don't
    *  support it may ignore or reject it — /effort checks models.dev). */
-  reasoningEffort?: "low" | "medium" | "high";
+  reasoningEffort?: "minimal" | "low" | "medium" | "high";
   /** Color theme name (see /theme). Ignored when NO_COLOR is set. */
   theme?: string;
   /** Shell hooks: preBash/preWrite/preEdit (nonzero exit blocks the tool),

@@ -91,7 +91,7 @@ Type `/` to open the command menu (↑/↓ navigate, Enter/Tab select, Esc close
 | `/plan` / `/code` | switch mode — plan is structurally read-only (only read/glob/grep schemas are sent) and produces an implementation plan; code (default) has all tools. The prompt shows the active mode: `plan › ` / `code › ` |
 | `/model <id>` | switch model; `/model <provider>/<model>` switches provider too — unknown providers are resolved live from models.dev |
 | `/theme [name]` | list themes with color swatches, or switch — `default` · `mono` · `nord` · `dracula` · `gruvbox` · `solarized` · `matrix`. The choice is saved to `<dataDir>/config.json`; `NO_COLOR` forces mono |
-| `/effort low\|medium\|high\|off` | reasoning effort, sent as `reasoning_effort` (config default: `reasoningEffort`); checks models.dev whether the model supports reasoning and warns if not — shown on the status line |
+| `/effort minimal\|low\|medium\|high\|off` | reasoning effort, sent as `reasoning_effort` (aliases `max`/`min`/`med` accepted; config default: `reasoningEffort`); checks models.dev whether the model supports reasoning and warns if not — shown on the status line |
 | `/models <query>` | search the models.dev catalog |
 | `/new` `/resume <id>` `/sessions` | session management |
 | `/undo` `/diff [n]` `/checkpoints` `/restore <hash>` | shadow-git checkpoint ops (see below) |

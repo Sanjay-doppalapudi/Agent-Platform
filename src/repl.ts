@@ -16,7 +16,7 @@ import { readLine, type SlashCommand } from "./input.ts";
 import { MdRenderer } from "./md.ts";
 import { errorHint, renderDiff, toolLabel, toolSummary } from "./ui.ts";
 import { Session } from "./session.ts";
-import { currentTheme, frameBottom, frameTop, frameWidth, paint, setTheme, themeNames, THEMES } from "./theme.ts";
+import { currentTheme, EFFORT_LEVELS, frameBottom, frameTop, frameWidth, paint, parseEffort, setTheme, themeNames, THEMES, type EffortLevel } from "./theme.ts";
 import type { Usage } from "./stream.ts";
 import type { CliFlags } from "./index.ts";
 
@@ -292,7 +292,7 @@ export async function replMain(flags: CliFlags) {
   const hinted = new Set<string>();
 
   // Reasoning effort: sent as `reasoning_effort` when set (/effort, config).
-  let effort: "low" | "medium" | "high" | undefined = config.reasoningEffort;
+  let effort: EffortLevel | undefined = config.reasoningEffort;
 
   // Session spend for the status line. Pricing resolves lazily from the
   // models.dev catalog AFTER the first turn (never on the startup path).
@@ -498,8 +498,12 @@ export async function replMain(flags: CliFlags) {
           .map((f) => f.replace(/\\/g, "/"));
       },
       onCtrlO: () => toggleVerbose(true),
-      status: config.light ? undefined : () => (framed ? edge(frameBottom(frameWidth(), statusFor())) : `  ${statusFor()}`),
-    }))?.trim();
+      status: config.light ? undefined : () => (framed ? frameBottom(frameWidth(), statusFor(), edge) : `  ${statusFor()}`),
+    }));
+    // Submitting erases the live status row (it is the bottom edge), so close
+    // the box explicitly — otherwise the transcript keeps an open-ended frame.
+    if (framed) console.log(edge(frameBottom(frameWidth())));
+    input = input === null ? null : input.trim();
 
     if (input === null || input === undefined) exit(0);
     if (!input) continue;
@@ -634,16 +638,17 @@ export async function replMain(flags: CliFlags) {
             console.log(dim(`reasoning effort: ${effort ?? "provider default"} — /effort low | medium | high | off`));
             continue;
           }
-          if (arg === "off" || arg === "default") {
+          const level = parseEffort(arg);
+          if (!level) {
+            console.log(dim(`unknown effort "${arg}" — use ${EFFORT_LEVELS.join(" | ")} | off (aliases: max, min, med…)`));
+            continue;
+          }
+          if (level === "off") {
             effort = undefined;
             console.log(dim("reasoning effort → provider default"));
             continue;
           }
-          if (arg !== "low" && arg !== "medium" && arg !== "high") {
-            console.log(dim("usage: /effort low | medium | high | off"));
-            continue;
-          }
-          effort = arg;
+          effort = level;
           let note = "";
           try {
             const { loadCatalog, modelReasoning } = await import("./models.ts");

@@ -68,6 +68,24 @@ export function themeNames(): string[] {
   return Object.keys(THEMES);
 }
 
+/** Reasoning-effort levels AP accepts, plus the aliases people actually type. */
+export const EFFORT_LEVELS = ["minimal", "low", "medium", "high"] as const;
+export type EffortLevel = (typeof EFFORT_LEVELS)[number];
+const EFFORT_ALIASES: Record<string, EffortLevel | "off"> = {
+  max: "high", maximum: "high", hi: "high", full: "high",
+  med: "medium", mid: "medium", normal: "medium",
+  min: "minimal", lowest: "minimal", none: "off", default: "off", auto: "off",
+};
+
+/** Normalize an /effort argument → a level, "off", or null when unusable. */
+export function parseEffort(arg: string): EffortLevel | "off" | null {
+  const a = arg.trim().toLowerCase();
+  if (!a) return null;
+  if (a === "off") return "off";
+  if ((EFFORT_LEVELS as readonly string[]).includes(a)) return a as EffortLevel;
+  return EFFORT_ALIASES[a] ?? null;
+}
+
 const colorless = !!process.env.NO_COLOR || process.env.TERM === "dumb";
 let active: Theme = colorless ? THEMES["mono"]! : THEMES["default"]!;
 
@@ -111,13 +129,18 @@ export function frameTop(width: number, label = ""): string {
 }
 
 /**
- * Bottom edge carrying the status text: `╰─ model · ctx 4% ───╯`. Status may
- * already contain ANSI codes, so width math uses the visible length; an
- * over-long status is truncated rather than wrapped (wrapping breaks the box).
+ * Bottom edge carrying the status text: `╰─ model · ctx 4% ───╯`.
+ *
+ * The status usually contains its own SGR codes, and any reset inside it
+ * (`\x1b[0m`) would terminate a color wrapped around the WHOLE line — leaving
+ * the trailing `───╯` in the terminal's default color. So the border pieces
+ * are painted individually and the status is passed through untouched.
+ * Width math uses visible (ANSI-stripped) length; an over-long status is
+ * truncated rather than wrapped, because wrapping breaks the box.
  */
-export function frameBottom(width: number, status = ""): string {
+export function frameBottom(width: number, status = "", border: (s: string) => string = (s) => s): string {
   const w = Math.max(4, width);
-  if (!status) return `╰${"─".repeat(w - 2)}╯`;
+  if (!status) return border(`╰${"─".repeat(w - 2)}╯`);
   let s = status;
   const budget = w - 6;
   if (visibleLen(s) > budget) {
@@ -136,5 +159,5 @@ export function frameBottom(width: number, status = ""): string {
     s = out + "…";
   }
   const fill = "─".repeat(Math.max(1, w - visibleLen(s) - 5));
-  return `╰─ ${s} ${fill}╯`;
+  return `${border("╰─ ")}${s}${border(` ${fill}╯`)}`;
 }
