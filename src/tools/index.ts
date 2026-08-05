@@ -288,11 +288,15 @@ function normalizeArgs(name: string, args: any): any {
 /** JSON.parse with cheap repairs for common model mistakes. Throws if hopeless. */
 function parseArgsLenient(raw: string): any {
   if (!raw || !raw.trim()) return {};
-  try { return JSON.parse(raw); } catch {}
   let s = raw.trim();
   try {
     const once = JSON.parse(s);
-    if (typeof once === "string") return JSON.parse(once); // double-encoded
+    if (typeof once !== "string") return once;
+    // Valid JSON that IS a string = double-encoded arguments. (This used to be
+    // unreachable: an earlier `return JSON.parse(raw)` handed the raw string
+    // back to callers, which then saw no arguments at all.)
+    s = once;
+    try { return JSON.parse(s); } catch {} // fall through to the repairs below
   } catch {}
   s = s.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   s = s.replace(/[“”]/g, '"').replace(/[‘’]/g, "'");
@@ -367,11 +371,25 @@ export function permissionFor(config: Config, tool: string, argsRaw: string): Pe
   for (const [key, val] of Object.entries(rules)) {
     if (key !== tool && !globRe(key).test(tool)) continue;
     if (typeof val === "string") return val;
-    let cmd = "";
+    // Command patterns must be matched against the SAME arguments execTool
+    // will run. Using strict JSON.parse here was a bypass: malformed args
+    // (trailing comma, fences, smart quotes — which models emit constantly)
+    // failed to parse, read as an empty command, missed every deny pattern,
+    // and fell through to the default — after which the lenient parser in
+    // execTool repaired them and ran the command anyway.
+    let cmd: string | null = null;
     try {
-      const a = JSON.parse(argsRaw || "{}");
-      cmd = String(a.cmd ?? a.command ?? a.script ?? "").trim();
-    } catch {}
+      const a = parseArgsLenient(argsRaw);
+      cmd = String(a?.cmd ?? a?.command ?? a?.script ?? "").trim();
+    } catch {
+      cmd = null; // unparseable even leniently
+    }
+    if (cmd === null) {
+      // The command is unknowable, so the patterns cannot be evaluated. Fail
+      // closed whenever any rule is stricter than the default.
+      const strict = Object.entries(val).some(([p, v]) => p !== "*" && (v === "deny" || v === "ask"));
+      return strict ? "ask" : val["*"] ?? null;
+    }
     for (const [pat, v] of Object.entries(val)) {
       if (pat !== "*" && globRe(pat).test(cmd)) return v;
     }

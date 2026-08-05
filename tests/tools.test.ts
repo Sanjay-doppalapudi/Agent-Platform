@@ -93,4 +93,45 @@ describe("permissionFor", () => {
     expect(permissionFor(cfg, "read", "{}")).toBeNull();
     expect(permissionFor({} as any, "bash", "{}")).toBeNull();
   });
+
+  // SECURITY REGRESSION: permissionFor used strict JSON.parse while execTool
+  // used the lenient one, so malformed-but-repairable arguments evaded deny
+  // rules and then ran anyway. Every shape execTool can repair must be
+  // evaluated by the SAME rules.
+  describe("malformed arguments cannot evade a deny rule", () => {
+    const deny: any = { permission: { bash: { "rm *": "deny", "*": "allow" } } };
+    const variants: [string, string][] = [
+      ["strict json", '{"cmd":"rm -rf build"}'],
+      ["trailing comma", '{"cmd": "rm -rf build",}'],
+      ["fenced", '```json\n{"cmd": "rm -rf build"}\n```'],
+      ["double-encoded", JSON.stringify('{"cmd": "rm -rf build"}')],
+      ["smart quotes", '{“cmd”: “rm -rf build”}'],
+    ];
+    for (const [label, args] of variants) {
+      test(`${label} → deny`, () => expect(permissionFor(deny, "bash", args)).toBe("deny"));
+    }
+    test("allow rules still work on repaired args", () => {
+      expect(permissionFor(deny, "bash", '{"cmd": "echo hi",}')).toBe("allow");
+    });
+    test("truly unparseable args fail closed when a strict rule exists", () => {
+      expect(permissionFor(deny, "bash", "{not json at all")).toBe("ask");
+    });
+    test("truly unparseable args use the default when nothing is strict", () => {
+      const permissive: any = { permission: { bash: { "*": "allow" } } };
+      expect(permissionFor(permissive, "bash", "{not json at all")).toBe("allow");
+    });
+  });
+});
+
+describe("parseArgsLenient double-encoding (via execTool)", () => {
+  test("double-encoded arguments are decoded, not dropped", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "ap-test-dbl-"));
+    writeFileSync(join(dir, "f.txt"), "content here\n");
+    const c = loadConfig({ cwd: dir } as any);
+    const r = await execTool("read", JSON.stringify(JSON.stringify({ path: "f.txt" })), {
+      cwd: dir, signal: new AbortController().signal, config: c, permit: async () => true,
+    } as any);
+    expect(r.error).toBe(false);
+    expect(r.output).toContain("content here");
+  });
 });
