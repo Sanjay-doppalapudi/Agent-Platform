@@ -188,14 +188,27 @@ export function redactEnvContent(content: string): string {
     .join("\n");
 }
 
-/** Keep head + tail, elide the middle. */
+/**
+ * Keep head + tail, elide the middle. Cuts on BYTES, not UTF-16 units: the cap
+ * is a byte budget, so slicing by characters let CJK/emoji-heavy output run
+ * ~3x over every documented cap (a "50KB" fetch could return ~150KB). Cut
+ * points snap back to a UTF-8 lead byte so no character is split in half.
+ */
 export function truncateMiddle(s: string, maxBytes: number): string {
-  if (Buffer.byteLength(s, "utf8") <= maxBytes) return s;
-  const half = Math.floor(maxBytes / 2);
-  const head = s.slice(0, half);
-  const tail = s.slice(-half);
-  const cut = Buffer.byteLength(s, "utf8") - maxBytes;
-  return `${head}\n[... ${cut} bytes truncated ...]\n${tail}`;
+  const bytes = new TextEncoder().encode(s);
+  if (bytes.length <= maxBytes) return s;
+  const half = Math.max(0, Math.floor(maxBytes / 2) - 40); // leave room for the marker
+  const isCont = (b: number | undefined) => b !== undefined && (b & 0xc0) === 0x80;
+
+  let end = half;
+  while (end > 0 && isCont(bytes[end])) end--; // don't split a character
+
+  let start = bytes.length - half;
+  while (start < bytes.length && isCont(bytes[start])) start++;
+
+  const dec = new TextDecoder();
+  const cut = bytes.length - maxBytes;
+  return `${dec.decode(bytes.subarray(0, end))}\n[... ${cut} bytes truncated ...]\n${dec.decode(bytes.subarray(start))}`;
 }
 
 export class ToolError extends Error {}

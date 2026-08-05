@@ -47,23 +47,29 @@ export async function websearchTool(
   if (!res.ok) throw new ToolError(`websearch failed: HTTP ${res.status}`);
   const html = await res.text();
 
-  // Titles and snippets appear in the same document order — extract each list
-  // and zip by index (pairing them in one regex risks spanning result blocks).
-  const titles: { url: string; title: string }[] = [];
-  for (const m of html.matchAll(/class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g)) {
-    const url = realUrl(m[1]!);
-    if (!url || /ad_domain=|duckduckgo\.com\/y\.js/.test(m[1]!)) continue; // skip ads
-    titles.push({ url, title: decodeEntities(m[2]!) });
-    if (titles.length >= limit) break;
-  }
-  const snippets: string[] = [];
-  for (const m of html.matchAll(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g)) {
-    snippets.push(decodeEntities(m[1]!));
-    if (snippets.length >= limit) break;
+  // Parse per RESULT BLOCK so each snippet stays with its own title. Zipping
+  // two independently-filtered lists by index desynchronized them the moment
+  // one candidate was skipped (an ad), attaching every later snippet to the
+  // wrong URL. The split anchors on the container class — `result` followed by
+  // a space or quote — so nested `result__*` divs don't fragment a block.
+  const results: { url: string; title: string; snippet: string }[] = [];
+  for (const block of html.split(/<div class="result[ "]/).slice(1)) {
+    const t = block.match(/class="result__a"[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/);
+    if (!t) continue;
+    if (/ad_domain=|duckduckgo\.com\/y\.js/.test(t[1]!)) continue; // ad
+    const url = realUrl(t[1]!);
+    if (!url) continue;
+    const s = block.match(/class="result__snippet"[^>]*>([\s\S]*?)<\/a>/);
+    results.push({
+      url,
+      title: decodeEntities(t[2]!),
+      snippet: s ? decodeEntities(s[1]!) : "",
+    });
+    if (results.length >= limit) break;
   }
 
-  if (!titles.length) return `no results for "${args.query}"`;
-  return titles
-    .map((t, i) => `${i + 1}. ${t.title}\n   ${t.url}${snippets[i] ? `\n   ${snippets[i]}` : ""}`)
+  if (!results.length) return `no results for "${args.query}"`;
+  return results
+    .map((r, i) => `${i + 1}. ${r.title}\n   ${r.url}${r.snippet ? `\n   ${r.snippet}` : ""}`)
     .join("\n");
 }

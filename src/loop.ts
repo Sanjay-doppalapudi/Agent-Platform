@@ -120,7 +120,10 @@ export async function loopMain(flags: CliFlags) {
     return null;
   };
 
-  let cp = new Checkpoints(config, session.id);
+  // Bound to its own id so compaction (which starts a fresh session) keeps
+  // the checkpoint chain — and therefore the "total" diff — intact.
+  const cpSessionId = session.id;
+  let cp = new Checkpoints(config, cpSessionId);
   let loopStart: string | null = cp.available() ? cp.head() : null;
   const checkpoint = (label: string) => {
     if (cp.available()) {
@@ -148,15 +151,51 @@ export async function loopMain(flags: CliFlags) {
   const historySize = () => session.history.reduce((n, m) => n + JSON.stringify(m).length, 0);
 
   const goal = flags.prompt;
+
+  /**
+   * Summarize into a fresh session when history outgrows the budget, folding
+   * the PENDING next message into the handoff. Compaction used to sit after
+   * the audit only, so both `continue` paths (a failing --check, a failed
+   * final recheck) skipped it — exactly the workloads that iterate most —
+   * and the loop grew context until the provider rejected the request.
+   */
+  const maybeCompact = async (pending: string): Promise<string> => {
+    if (historySize() <= budget) return pending;
+    status(`loop ${iter} — compacting context`);
+    const summary = await turn(COMPACT_PROMPT);
+    if (ctrl.signal.aborted) return pending; // bailIfAborted handles the exit
+    session = Session.create(config.dataDir, {
+      cwd: config.cwd,
+      model: provider.model,
+      at: new Date().toISOString(),
+      checkpointId: cpSessionId, // keep the /undo trail reachable
+    });
+    config.sessionId = session.id;
+    return `[loop mode] GOAL:\n${goal}\n\nProgress handoff from the previous context:\n${summary.text.trim()}\n\n${pending}`;
+  };
+
   let nextMsg = `[loop mode] GOAL:\n${goal}\n\nWork until this goal is FULLY complete. Claims are not enough — an auditor re-verifies everything, and any verification command must pass. You will be re-invoked until it does.\nIf the goal does not apply to this directory (e.g. it mentions tests and none exist here), do NOT hunt for meaning in other folders — reply LOOP_BLOCKED: <one-line reason> and stop.`;
   let iter = 0;
   let lastAudit = "";
   let sameAuditStreak = 0;
   let anyMutationSinceAudit = false;
 
+  // runTurn RETURNS (never throws) when aborted, so without an explicit check
+  // after every await, ctrl+c left the loop spinning at full CPU forever:
+  // re-running check commands, appending to the session file, and firing a
+  // lifecycle hook per pass.
+  const bailIfAborted = async () => {
+    if (!ctrl.signal.aborted) return;
+    status(`aborted at iteration ${iter}`);
+    showChanges(loopStart, "total");
+    await lifecycleSettled();
+    process.exit(130);
+  };
+
   try {
     while (true) {
       iter++;
+      await bailIfAborted();
       if (maxIter > 0 && iter > maxIter) {
         status(`stopped: --max ${maxIter} iterations reached (goal not verified)`);
         showChanges(loopStart, "total");
@@ -166,6 +205,7 @@ export async function loopMain(flags: CliFlags) {
       const iterStart = cp.available() ? cp.head() : null;
       status(`loop ${iter} — working`);
       const work = await turn(nextMsg);
+      await bailIfAborted(); // do not respawn check commands after a cancel
       if (work.mutated) { anyMutationSinceAudit = true; checkpoint(`loop ${iter}: work`); }
 
       const blocked = work.text.match(/LOOP_BLOCKED:?\s*(.*)/);
@@ -181,7 +221,7 @@ export async function loopMain(flags: CliFlags) {
       if (failed) {
         showChanges(iterStart, `loop ${iter}`);
         status(`loop ${iter} — check failed: ${failed.cmd}`);
-        nextMsg = `[loop] Verification command failed:\n$ ${failed.cmd}\n${failed.out}\n\nFix the failure, then continue toward the goal.`;
+        nextMsg = await maybeCompact(`[loop] Verification command failed:\n$ ${failed.cmd}\n${failed.out}\n\nFix the failure, then continue toward the goal.`);
         continue;
       }
 
@@ -191,6 +231,7 @@ export async function loopMain(flags: CliFlags) {
       // 3 consecutive LOOP_DONE audits we trust it regardless.
       status(`loop ${iter} — verifying`);
       let audit = await turn(VERIFY_PROMPT);
+      await bailIfAborted();
       let doneVotes = /\bLOOP_DONE\b/.test(audit.text) ? 1 : 0;
       while (doneVotes >= 1 && doneVotes < 3 && audit.mutated) {
         anyMutationSinceAudit = true;
@@ -218,9 +259,10 @@ export async function loopMain(flags: CliFlags) {
         if (!recheck) {
           status(`done after ${iter} iteration${iter === 1 ? "" : "s"} — goal verified`);
           showChanges(loopStart, "total");
+          await lifecycleSettled(); // the success path needs onDone the most
           process.exit(0);
         }
-        nextMsg = `[loop] Final check failed after your LOOP_DONE:\n$ ${recheck.cmd}\n${recheck.out}\n\nFix it.`;
+        nextMsg = await maybeCompact(`[loop] Final check failed after your LOOP_DONE:\n$ ${recheck.cmd}\n${recheck.out}\n\nFix it.`);
         continue;
       }
 

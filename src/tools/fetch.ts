@@ -72,7 +72,11 @@ async function renderWithBrowser(url: string, signal: AbortSignal): Promise<stri
       "--no-default-browser-check",
       "--hide-scrollbars",
       "--mute-audio",
-      `--user-data-dir=${join(tmpdir(), ".ap", "headless-profile")}`,
+      // Unique per spawn: a shared profile dir is locked by the first Chrome,
+      // so concurrent render:true calls in one turn silently failed and were
+      // reported as "no browser found". Keep SOME profile dir, though —
+      // without one Chrome would attach to the user's real profile.
+      `--user-data-dir=${join(tmpdir(), ".ap", `hl-${process.pid}-${Math.random().toString(36).slice(2, 10)}`)}`,
       "--virtual-time-budget=6000", // let JS/fetches settle (virtual clock)
       "--timeout=15000",
       "--dump-dom",

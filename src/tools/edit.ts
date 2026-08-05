@@ -18,6 +18,13 @@ export async function editTool(
   await ensureAllowed(path, ctx, "edit file");
   const file = Bun.file(path);
   if (!(await file.exists())) throw new ToolError(`file not found: ${path}`);
+  // Detect the BOM at the BYTE level: file.text() has already consumed it, so
+  // writing the decoded string back silently dropped three bytes from files
+  // that need them. The decoded content stays BOM-free (matching what `read`
+  // showed the model, so `old` still matches) and the BOM is re-prepended on
+  // write.
+  const rawBytes = new Uint8Array(await file.arrayBuffer());
+  const hadBom = rawBytes[0] === 0xef && rawBytes[1] === 0xbb && rawBytes[2] === 0xbf;
   const content = await file.text();
 
   if (!args.old) {
@@ -53,7 +60,7 @@ export async function editTool(
     // and $' — `$'` splices the whole file tail in, silently duplicating it.
     // A function replacer returns the text literally (same idiom as pass 3).
     const updated = args.all ? content.split(old).join(nw) : content.replace(old, () => nw);
-    await Bun.write(path, updated);
+    await Bun.write(path, hadBom ? `﻿${updated}` : updated);
     return `replaced ${args.all ? count : 1} occurrence${count > 1 && args.all ? "s" : ""} in ${path}${note}`;
   }
 
@@ -71,7 +78,7 @@ export async function editTool(
       const replacement = fileIsCRLF ? args.new.replace(/(?<!\r)\n/g, "\r\n") : args.new;
       const re = new RegExp(pattern, args.all ? "g" : "");
       const updated = content.replace(re, () => replacement);
-      await Bun.write(path, updated);
+      await Bun.write(path, hadBom ? `﻿${updated}` : updated);
       return `replaced ${args.all ? c : 1} occurrence${c > 1 && args.all ? "s" : ""} in ${path} (matched ignoring trailing whitespace)`;
     }
   }
