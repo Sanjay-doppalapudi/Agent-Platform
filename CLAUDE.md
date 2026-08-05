@@ -57,6 +57,7 @@ Data flow per turn: `repl/run/server` → `runTurn()` (agent.ts) → `streamChat
 - **grep AND glob shell out to ripgrep** so `HARD_IGNORES` dirs (node_modules, builds, trash, dist*, …) are pruned during traversal — the target repo (5Pages) has ~5,000 generated files that make post-filtering unusable.
 - **Reasoning is never re-sent**: `<think>` blocks and `reasoning_content` are surfaced to the UI but excluded from stored history.
 - Terminal rendering is line-buffered markdown (`md.ts`) and a raw-mode line reader (`input.ts`); the readLine `prompt` string must be single-line — it is re-rendered on every keypress.
+- **Themes + input frame** (`theme.ts`): a theme is a palette of ANSI codes; repl.ts's dim/cyan/green/… helpers resolve `currentTheme()` per call, so `/theme` switches apply instantly without touching ~80 call sites, and ui.ts's diff colors are getters for the same reason. The prompt frame is top edge (mode label) + a left edge on the input line + the status row as the bottom edge — only the input line carries a left edge, so wrapped text can never break the box. `frameTop`/`frameBottom` do width math on VISIBLE length (ANSI-stripped) and truncate rather than wrap. NO_COLOR/TERM=dumb force mono.
 
 ## Legacy-name compatibility (post-rebrand)
 

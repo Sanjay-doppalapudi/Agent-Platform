@@ -53,6 +53,8 @@ export interface Config {
   /** Default reasoning effort sent as `reasoning_effort` (models that don't
    *  support it may ignore or reject it — /effort checks models.dev). */
   reasoningEffort?: "low" | "medium" | "high";
+  /** Color theme name (see /theme). Ignored when NO_COLOR is set. */
+  theme?: string;
   /** Shell hooks: preBash/preWrite/preEdit (nonzero exit blocks the tool),
    *  afterEdit (nonzero output is fed back to the model to self-fix).
    *  Lifecycle: onDone/onError — a shell command (AP_EVENT/AP_PAYLOAD env)

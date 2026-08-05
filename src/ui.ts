@@ -1,10 +1,14 @@
 // Human-friendly tool rendering: labels, result summaries, and diff blocks.
 // Everything here is pure string work on data already in memory — no I/O.
 
+import { currentTheme } from "./theme.ts";
+
+// Diff colors follow the active theme (see /theme); getters, not constants,
+// so a mid-session switch applies to the very next render.
 const R = "\x1b[0m";
-const DIM = "\x1b[2m";
-const RED = "\x1b[31m";
-const GREEN = "\x1b[32m";
+const DIM = () => currentTheme().dim || "\x1b[2m";
+const RED = () => currentTheme().del;
+const GREEN = () => currentTheme().add;
 
 function trunc(s: string, n: number): string {
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
@@ -97,22 +101,22 @@ export function renderDiff(name: string, args: any, maxWidth?: number): string {
     const newL = String(newRaw ?? "").split("\n");
     while (oldL.length && newL.length && oldL[0] === newL[0]) { oldL.shift(); newL.shift(); }
     while (oldL.length && newL.length && oldL[oldL.length - 1] === newL[newL.length - 1]) { oldL.pop(); newL.pop(); }
-    out.push(`${DIM}${args?.path ?? ""}${R}`);
+    out.push(`${DIM()}${args?.path ?? ""}${R}`);
     const o = capLines(oldL, 12);
-    for (const l of o.shown) out.push(`${RED}- ${trunc(l, width)}${R}`);
-    if (o.hidden) out.push(`${DIM}  … ${o.hidden} more removed lines${R}`);
+    for (const l of o.shown) out.push(`${RED()}- ${trunc(l, width)}${R}`);
+    if (o.hidden) out.push(`${DIM()}  … ${o.hidden} more removed lines${R}`);
     const n = capLines(newL, 12);
-    for (const l of n.shown) out.push(`${GREEN}+ ${trunc(l, width)}${R}`);
-    if (n.hidden) out.push(`${DIM}  … ${n.hidden} more added lines${R}`);
+    for (const l of n.shown) out.push(`${GREEN()}+ ${trunc(l, width)}${R}`);
+    if (n.hidden) out.push(`${DIM()}  … ${n.hidden} more added lines${R}`);
     return out.join("\n") + "\n";
   }
 
   if (name === "write") {
     const lines = String(args?.content ?? "").split("\n");
-    out.push(`${DIM}${args?.path ?? ""} · new file · ${lines.length} lines${R}`);
+    out.push(`${DIM()}${args?.path ?? ""} · new file · ${lines.length} lines${R}`);
     const c = capLines(lines, 12);
-    for (const l of c.shown) out.push(`${GREEN}+ ${trunc(l, width)}${R}`);
-    if (c.hidden) out.push(`${DIM}  … ${c.hidden} more lines${R}`);
+    for (const l of c.shown) out.push(`${GREEN()}+ ${trunc(l, width)}${R}`);
+    if (c.hidden) out.push(`${DIM()}  … ${c.hidden} more lines${R}`);
     return out.join("\n") + "\n";
   }
 

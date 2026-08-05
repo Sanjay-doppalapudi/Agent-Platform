@@ -1,7 +1,7 @@
 // Interactive REPL: slash-command menu, streaming markdown render, ctrl+o
 // detail toggle (true collapse/expand via in-place re-render), ctrl+c aborts.
 import { emitKeypressEvents } from "node:readline";
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { loadConfig, resolveProvider } from "./config.ts";
 import { initMcp } from "./mcp.ts";
@@ -16,15 +16,19 @@ import { readLine, type SlashCommand } from "./input.ts";
 import { MdRenderer } from "./md.ts";
 import { errorHint, renderDiff, toolLabel, toolSummary } from "./ui.ts";
 import { Session } from "./session.ts";
+import { currentTheme, frameBottom, frameTop, frameWidth, paint, setTheme, themeNames, THEMES } from "./theme.ts";
 import type { Usage } from "./stream.ts";
 import type { CliFlags } from "./index.ts";
 
-const dim = (s: string) => `\x1b[2m${s}\x1b[0m`;
-const cyan = (s: string) => `\x1b[36m${s}\x1b[0m`;
-const bold = (s: string) => `\x1b[1m${s}\x1b[0m`;
-const green = (s: string) => `\x1b[32m${s}\x1b[0m`;
-const red = (s: string) => `\x1b[31m${s}\x1b[0m`;
-const yellow = (s: string) => `\x1b[33m${s}\x1b[0m`;
+// Colors resolve through the active theme on every call, so /theme switches
+// take effect immediately without touching any of the ~80 call sites.
+const dim = (s: string) => paint(currentTheme().dim, s);
+const cyan = (s: string) => paint(currentTheme().accent, s);
+const bold = (s: string) => paint(currentTheme().text, s);
+const green = (s: string) => paint(currentTheme().success, s);
+const red = (s: string) => paint(currentTheme().error, s);
+const yellow = (s: string) => paint(currentTheme().warn, s);
+const edge = (s: string) => paint(currentTheme().border, s);
 
 // Visual hierarchy without an accent bar: answer text renders flush-left in
 // the default color; everything that is NOT the answer (tool lines, diffs,
@@ -55,7 +59,7 @@ function rowsUp(s: string): number {
 
 const BUILTIN_CMDS = new Set([
   "exit", "q", "quit", "new", "resume", "session", "sessions", "sandbox",
-  "model", "models", "mode", "plan", "code", "system", "context", "agents", "effort",
+  "model", "models", "mode", "plan", "code", "system", "context", "agents", "effort", "theme",
   "undo", "diff", "checkpoints", "restore", "worktree", "compact", "share", "ps", "commit",
 ]);
 
@@ -69,6 +73,7 @@ const COMMANDS: SlashCommand[] = [
   { name: "/resume", desc: "resume a session by id", hasArg: true },
   { name: "/sessions", desc: "list recent sessions" },
   { name: "/sandbox", desc: "show or toggle the write-sandbox", hasArg: true },
+  { name: "/theme", desc: "list or switch color themes", hasArg: true },
   { name: "/agents", desc: "list subagents spawned this session" },
   { name: "/ps", desc: "background processes: list | tail <pid> | kill <pid>", hasArg: true },
   { name: "/skills", desc: "list available SKILL.md packs" },
@@ -215,6 +220,7 @@ class TurnRenderer {
 
 export async function replMain(flags: CliFlags) {
   const config = loadConfig(flags);
+  if (config.theme) setTheme(config.theme);
   let provider: ReturnType<typeof resolveProvider>;
   try {
     provider = resolveProvider(config, flags);
@@ -317,7 +323,7 @@ export async function replMain(flags: CliFlags) {
         s.status === "running" ? yellow("●") : s.status === "done" ? green("●") : red("●")).join("");
       parts.push(`${dim(`◇ ${subs.length}`)} ${dots} ${dim("/agents")}`);
     }
-    return `  ${parts.join(dim(" · "))}`;
+    return parts.join(dim(" · "));
   };
   // Re-evaluated per keypress render — memoized so typing costs nothing.
   let statusCache = { at: 0, s: "" };
@@ -467,8 +473,15 @@ export async function replMain(flags: CliFlags) {
   };
 
   for (;;) {
-    const promptLabel = `${dim(config.mode)} ${cyan("›")} `;
+    // Framed input: top edge (with the mode as its label), a left edge on the
+    // input line itself, and the status row doubling as the bottom edge. Only
+    // the input line carries a left edge, so wrapped text never breaks the box.
+    const framed = !config.light && process.stdout.isTTY;
+    const promptLabel = framed
+      ? `${edge("│")} ${cyan("›")} `
+      : `${dim(config.mode)} ${cyan("›")} `;
     process.stdout.write("\n");
+    if (framed) console.log(edge(frameTop(frameWidth(), config.mode)));
     let input = (await readLine({
       prompt: promptLabel,
       commands: menuCommands,
@@ -485,7 +498,7 @@ export async function replMain(flags: CliFlags) {
           .map((f) => f.replace(/\\/g, "/"));
       },
       onCtrlO: () => toggleVerbose(true),
-      status: config.light ? undefined : statusFor,
+      status: config.light ? undefined : () => (framed ? edge(frameBottom(frameWidth(), statusFor())) : `  ${statusFor()}`),
     }))?.trim();
 
     if (input === null || input === undefined) exit(0);
@@ -586,6 +599,33 @@ export async function replMain(flags: CliFlags) {
               console.log(dim(`provider → ${pfx} via models.dev (${baseUrl}), model → ${modelId}`));
             } catch (e) { console.log(dim((e as Error).message)); }
           }
+          continue;
+        }
+        case "theme": {
+          const arg = rest[0]?.toLowerCase();
+          if (!arg) {
+            for (const n of themeNames()) {
+              const t = THEMES[n]!;
+              const swatch = `${paint(t.accent, "●")}${paint(t.success, "●")}${paint(t.warn, "●")}${paint(t.error, "●")}${paint(t.border, "●")}`;
+              console.log(`${swatch} ${n === currentTheme().name ? cyan(`${n} ✓`) : n} ${dim(t.desc)}`);
+            }
+            console.log(dim(`/theme <name> to switch (saved to ${join(config.dataDir, "config.json")})`));
+            continue;
+          }
+          if (!setTheme(arg)) {
+            console.log(dim(`unknown theme "${arg}" — available: ${themeNames().join(", ")}`));
+            continue;
+          }
+          // Persist the choice: a UI preference the user explicitly asked for.
+          let saved = "";
+          try {
+            const p = join(config.dataDir, "config.json");
+            const cur = existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : {};
+            cur.theme = currentTheme().name;
+            writeFileSync(p, JSON.stringify(cur, null, 2) + "\n");
+            saved = ` · saved to ${p}`;
+          } catch (e) { saved = ` · not saved (${(e as Error).message})`; }
+          console.log(`${cyan(`theme → ${currentTheme().name}`)}${dim(saved)}`);
           continue;
         }
         case "effort": {
