@@ -5,7 +5,7 @@
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { truncateMiddle, ToolError } from "./shared.ts";
+import { anySignal, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 const MAX_BYTES = 50_000;
@@ -107,12 +107,16 @@ export async function fetchTool(
     if (html !== null) {
       return truncateMiddle(htmlToText(html), MAX_BYTES) || "(page rendered empty)";
     }
+    // A cancelled render also returns null. Falling through would fire a
+    // brand-new 15s request for a URL the user just cancelled — and blame a
+    // missing browser for it.
+    if (ctx.signal.aborted) throw new ToolError("fetch cancelled");
     ctx.warn?.("render requested but no Chrome/Edge found — falling back to plain fetch");
   }
   let res: Response;
   try {
     res = await fetch(args.url, {
-      signal: AbortSignal.timeout(15_000),
+      signal: anySignal(ctx.signal, AbortSignal.timeout(15_000)),
       headers: { "user-agent": "ap-agent/1.0", accept: "text/html,text/plain,application/json;q=0.9,*/*;q=0.5" },
       redirect: "follow",
     });

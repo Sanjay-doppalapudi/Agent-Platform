@@ -1,6 +1,6 @@
 // websearch tool: DuckDuckGo's HTML endpoint via plain fetch — no browser,
 // no API key, zero deps. Returns "N. Title \n URL \n snippet" blocks.
-import { ToolError } from "./shared.ts";
+import { anySignal, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 const decodeEntities = (s: string) =>
@@ -23,7 +23,7 @@ function realUrl(href: string): string | null {
 
 export async function websearchTool(
   args: { query: string; limit?: number },
-  _ctx: ToolCtx,
+  ctx: ToolCtx,
 ): Promise<string> {
   if (typeof args.query !== "string" || !args.query.trim()) {
     throw new ToolError('websearch requires {query:"search terms"}');
@@ -38,7 +38,7 @@ export async function websearchTool(
         "content-type": "application/x-www-form-urlencoded",
         "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) ap-agent/1.0",
       },
-      signal: AbortSignal.timeout(15_000),
+      signal: anySignal(ctx.signal, AbortSignal.timeout(15_000)), // ctrl+c must stop it
       redirect: "follow",
     });
   } catch (e) {

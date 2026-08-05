@@ -175,8 +175,12 @@ export function isEnvFile(path: string): boolean {
 
 /** Mask values in .env content: KEY=*** (model sees keys, never values). */
 export function redactEnvContent(content: string): string {
+  // Split on ALL line-ending flavours. Splitting on "\n" alone left a trailing
+  // "\r" on every line of a CRLF file, and the value pattern below cannot
+  // match it (`.` excludes \r, and `$` without /m is end-of-input) — so on
+  // Windows, where CRLF is the norm, redaction silently did nothing at all.
   return content
-    .split("\n")
+    .split(/\r\n|\r|\n/)
     .map((line) => {
       const m = line.match(/^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=)(.*)$/);
       return m && m[2]!.trim() ? `${m[1]}***` : line;
@@ -195,3 +199,11 @@ export function truncateMiddle(s: string, maxBytes: number): string {
 }
 
 export class ToolError extends Error {}
+
+/** Combine an abort signal with a timeout, tolerating runtimes without
+ *  AbortSignal.any (falls back to the timeout alone). */
+export function anySignal(a: AbortSignal | undefined, b: AbortSignal): AbortSignal {
+  if (!a) return b;
+  const any = (AbortSignal as any).any;
+  return typeof any === "function" ? any([a, b]) : b;
+}

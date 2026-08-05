@@ -48,7 +48,11 @@ export async function editTool(
     if (count > 1 && !args.all) {
       throw new ToolError(`found ${count} matches in ${path} — add surrounding context to old, or pass all:true`);
     }
-    const updated = args.all ? content.split(old).join(nw) : content.replace(old, nw);
+    // The replacement is arbitrary source code, NOT a regex substitution
+    // template: a bare string here makes String.replace interpret $$, $&, $`
+    // and $' — `$'` splices the whole file tail in, silently duplicating it.
+    // A function replacer returns the text literally (same idiom as pass 3).
+    const updated = args.all ? content.split(old).join(nw) : content.replace(old, () => nw);
     await Bun.write(path, updated);
     return `replaced ${args.all ? count : 1} occurrence${count > 1 && args.all ? "s" : ""} in ${path}${note}`;
   }

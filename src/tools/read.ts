@@ -28,6 +28,10 @@ export async function readTool(
   }
 
   const lines = content.split("\n");
+  // A trailing newline terminates the last line, it does not start a new one —
+  // keeping it printed a phantom blank line past every file's end and made the
+  // "more lines" hint over-count by one.
+  if (lines.at(-1) === "") lines.pop();
   const offset = Math.max(1, args.offset ?? 1);
   const limit = Math.min(args.limit ?? MAX_LINES, MAX_LINES);
   const slice = lines.slice(offset - 1, offset - 1 + limit);
