@@ -1,4 +1,4 @@
-import { allIgnores, ensureReadable, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
+import { allIgnores, ensureReadable, privateExcludeGlobs, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 const MAX_BYTES = 30_000;
@@ -24,6 +24,8 @@ export async function grepTool(
 
   const rgArgs = ["--no-messages", "--hidden"];
   for (const ig of allIgnores(ctx.config)) rgArgs.push("-g", `!**/${ig}/**`, "-g", `!${ig}/**`);
+  // Gating the root is not enough: rg must never WALK INTO private data.
+  if (ctx.config.sandbox !== "off") rgArgs.push(...privateExcludeGlobs(ctx.config, root));
   if (args.glob) rgArgs.push("-g", args.glob);
   if (args.ignoreCase) rgArgs.push("-i");
   switch (mode) {

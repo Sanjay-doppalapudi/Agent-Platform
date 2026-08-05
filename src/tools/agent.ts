@@ -2,7 +2,7 @@
 // Children are always the light profile, so they cannot spawn further agents
 // (structural recursion cap). Zero deps — we spawn our own binary.
 import { existsSync } from "node:fs";
-import { resolvePath, truncateMiddle, ToolError } from "./shared.ts";
+import { ensureAllowed, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 export interface SubagentInfo {
@@ -41,6 +41,10 @@ export async function agentTool(
     throw new ToolError("agent requires {task}");
   }
   const cwd = args.cwd ? resolvePath(args.cwd, ctx.cwd) : ctx.cwd;
+  // The child gets `cwd` as ITS sandbox root, so an unchecked cwd was a total
+  // escape: agent({cwd:"C:\\"}) handed a subagent the whole drive, with the
+  // parent's permission rules gone. Gate it like any other outside access.
+  if (args.cwd) await ensureAllowed(cwd, ctx, "delegate a subagent outside the workspace");
   const timeoutMs = Math.min((args.timeout ?? 300) * 1000, 900_000);
 
   // Named profile: validated HERE so a typo fails fast with the valid list

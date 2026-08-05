@@ -31,10 +31,14 @@ export function isIgnoredPath(relOrAbs: string, ignores: string[]): boolean {
 }
 
 export function resolvePath(p: string, cwd: string): string {
-  // Models on Windows sometimes emit Git-Bash style paths (/c/Users/...).
   if (process.platform === "win32") {
+    // Models on Windows sometimes emit Git-Bash style paths (/c/Users/...).
     const m = p.match(/^\/([A-Za-z])\/(.*)$/);
     if (m) p = `${m[1]!.toUpperCase()}:/${m[2]}`;
+    // Strip Windows device prefixes (\\?\C:\… and \\.\C:\…, plus their UNC
+    // forms). They address the SAME files but slip past every containment
+    // check, which made them a full sandbox bypass.
+    p = p.replace(/^\\\\[?.]\\UNC\\/i, "\\\\").replace(/^\\\\[?.]\\(?=[A-Za-z]:[\\/])/, "");
   }
   return isAbsolute(p) ? resolve(p) : resolve(cwd, p);
 }
@@ -72,15 +76,41 @@ export function readRoots(config: Config): string[] {
   return roots;
 }
 
-/** AP-private data: session transcripts, checkpoints, credentials, config.
- * NEVER readable by the model — permission cannot override, only sandbox:"off". */
-export function isPrivatePath(target: string, config: Config): boolean {
-  return isInsideRoots(target, [
+/** The four AP-private locations (transcripts, checkpoints, credentials, config). */
+export function privatePaths(config: Config): string[] {
+  return [
     join(config.dataDir, "sessions"),
     join(config.dataDir, "checkpoints"),
     join(config.dataDir, "credentials.json"),
     join(config.dataDir, "config.json"),
-  ]);
+  ];
+}
+
+/** AP-private data: session transcripts, checkpoints, credentials, config.
+ * NEVER readable by the model — permission cannot override, only sandbox:"off". */
+export function isPrivatePath(target: string, config: Config): boolean {
+  return isInsideRoots(target, privatePaths(config));
+}
+
+/**
+ * ripgrep --glob exclusions that keep a SEARCH from walking into AP-private
+ * data. `read` hard-denies those paths, but grep/glob only gated the search
+ * ROOT — so a search rooted above the data dir (running ap from your home
+ * directory is enough) happily printed credentials.json and past transcripts.
+ *
+ * Two forms per entry are required: `!rel` matches the file itself, `!rel/**`
+ * matches a directory's contents. Separators must be forward slashes — a
+ * backslash inside an rg glob is an escape, so Windows paths silently fail.
+ */
+export function privateExcludeGlobs(config: Config, searchRoot: string): string[] {
+  const out: string[] = [];
+  for (const p of privatePaths(config)) {
+    let rel = relative(searchRoot, p);
+    if (!rel || rel.startsWith("..") || isAbsolute(rel)) continue; // not under this root
+    rel = rel.replace(/\\/g, "/");
+    out.push("-g", `!${rel}`, "-g", `!${rel}/**`);
+  }
+  return out;
 }
 
 /** Gate a read: private → hard deny; outside read roots → permission. */

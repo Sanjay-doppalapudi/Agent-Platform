@@ -1,6 +1,6 @@
 import { statSync } from "node:fs";
 import { join } from "node:path";
-import { allIgnores, ensureReadable, isIgnoredPath, resolvePath } from "./shared.ts";
+import { allIgnores, ensureReadable, isPrivatePath, isIgnoredPath, privateExcludeGlobs, resolvePath } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 const MAX_RESULTS = 300;
@@ -24,6 +24,9 @@ export async function globTool(
   if (Bun.which("rg")) {
     const rgArgs = ["--files", "--hidden", "-g", args.pattern];
     for (const ig of ignores) rgArgs.push("-g", `!**/${ig}/**`, "-g", `!${ig}/**`);
+    // Never enumerate AP-private data (read hard-denies it — listing it here
+    // leaked transcript and credential filenames).
+    if (ctx.config.sandbox !== "off") rgArgs.push(...privateExcludeGlobs(ctx.config, root));
     const proc = Bun.spawn(["rg", ...rgArgs], { cwd: root, stdout: "pipe", stderr: "ignore" });
     const out = await new Response(proc.stdout).text();
     await proc.exited;
@@ -33,6 +36,7 @@ export async function globTool(
     rels = [];
     for await (const rel of glob.scan({ cwd: root, dot: false, onlyFiles: true })) {
       if (isIgnoredPath(rel, ignores)) continue;
+      if (ctx.config.sandbox !== "off" && isPrivatePath(join(root, rel), ctx.config)) continue;
       rels.push(rel);
       if (rels.length >= MAX_SCAN) break;
     }
