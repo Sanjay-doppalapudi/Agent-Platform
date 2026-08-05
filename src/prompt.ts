@@ -69,11 +69,20 @@ function memoriesForSession(memDir: string, sessionKey: string): string {
 }
 
 export function buildSystemPrompt(config: Config): string {
-  const shell = shellPrefix(config.shell)[0]!.includes("bash") ? "Git Bash" : "PowerShell";
+  // Describe the ACTUAL platform. This used to hardcode "Windows 11" and
+  // infer the shell from the substring "bash", so every macOS/Linux run told
+  // the model it was on Windows (and /usr/bin/bash was labelled "Git Bash").
+  // Still byte-stable per machine — nothing here varies between requests.
+  const exe = shellPrefix(config.shell)[0]!;
+  const isWin = process.platform === "win32";
+  const os = isWin ? "Windows" : process.platform === "darwin" ? "macOS" : "Linux";
+  const shell = isWin
+    ? (exe.includes("bash") ? "Git Bash" : exe.includes("powershell") ? "PowerShell" : "cmd")
+    : (exe.endsWith("bash") ? "bash" : "sh");
 
   let prompt = `You are a fast, terse coding agent. Act via tools; don't narrate routine steps. No preamble, no summaries of unchanged code.
 
-Environment: Windows 11. The bash tool runs ${shell}. Working directory: ${config.cwd}
+Environment: ${os}. The bash tool runs ${shell}. Working directory: ${config.cwd}
 Paths may be absolute or relative to the working directory.
 
 Rules:

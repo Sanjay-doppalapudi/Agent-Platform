@@ -6,7 +6,7 @@
 // Full profile only; --light never sees skills.
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import type { Config } from "./config.ts";
 
 export interface SkillInfo {
@@ -37,7 +37,7 @@ function scanDir(dir: string, source: string, into: Map<string, SkillInfo>) {
     const skillMd = join(dir, e, "SKILL.md");
     if (!existsSync(skillMd)) continue;
     try {
-      const raw = readFileSync(skillMd, "utf8");
+      const raw = readFileSync(skillMd, "utf8").replace(/^﻿/, ""); // BOM voids frontmatter
       if (/^\s*internal:\s*true/m.test(raw.match(FRONT_RE)?.[1] ?? "")) continue;
       const fm = parseFrontmatter(raw);
       const name = fm["name"] || e;
@@ -75,6 +75,21 @@ export function skillsPromptBlock(skills: SkillInfo[]): string {
 
 const MAX_FILES_PER_SKILL = 40;
 const MAX_FILE_BYTES = 512 * 1024;
+
+/**
+ * Is this a safe relative path to write under the skill directory?
+ *
+ * Git tree paths are always '/'-separated, so a backslash is never legitimate
+ * — and on Windows it IS a separator, which made `..\..\config.json` land on
+ * the user's own config (whose hooks.onDone is an arbitrary shell command) or
+ * credentials.json. This is the one writer that does not go through the tool
+ * sandbox, so it validates its own paths.
+ */
+export function safeSkillPath(rel: string): boolean {
+  if (!rel || rel.includes("\\") || rel.includes("\0")) return false;
+  if (/^[A-Za-z]:/.test(rel) || rel.startsWith("/")) return false; // absolute
+  return rel.split("/").every((seg) => seg !== "" && seg !== "." && seg !== ".." && !/[:<>"|?*]/.test(seg));
+}
 
 interface TreeEntry { path: string; type: string; size?: number }
 
@@ -129,16 +144,24 @@ export async function installSkill(
   if (files.length > MAX_FILES_PER_SKILL) {
     throw new Error(`skill "${pick.name}" has ${files.length} files (cap ${MAX_FILES_PER_SKILL}) — install manually`);
   }
+  if (!safeSkillPath(pick.name)) throw new Error(`unsafe skill name from repo: ${pick.name}`);
   const destRoot = join(dataDir, "skills", pick.name);
   for (const f of files) {
     if ((f.size ?? 0) > MAX_FILE_BYTES) { log(`  skip ${f.path} (too large)`); continue; }
     const rel = prefix === "" ? f.path : f.path.slice(prefix.length);
+    if (!safeSkillPath(rel)) { log(`  skip ${f.path} (unsafe path)`); continue; }
     const raw = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${f.path}`, {
       headers: { "user-agent": "ap-agent/1.0" },
       signal: AbortSignal.timeout(30_000),
     });
     if (!raw.ok) throw new Error(`download failed (${raw.status}): ${f.path}`);
     const dest = join(destRoot, rel);
+    // Belt and braces: even if the validator ever misses a form, never write
+    // outside the skill's own directory.
+    if (!resolve(dest).startsWith(resolve(destRoot) + sep)) {
+      log(`  skip ${f.path} (escapes the skill directory)`);
+      continue;
+    }
     mkdirSync(dirname(dest), { recursive: true });
     writeFileSync(dest, Buffer.from(await raw.arrayBuffer()));
     log(`  + ${rel}`);

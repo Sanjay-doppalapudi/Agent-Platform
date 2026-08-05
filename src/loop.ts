@@ -124,7 +124,11 @@ export async function loopMain(flags: CliFlags) {
   // the checkpoint chain — and therefore the "total" diff — intact.
   const cpSessionId = session.id;
   let cp = new Checkpoints(config, cpSessionId);
-  let loopStart: string | null = cp.available() ? cp.head() : null;
+  // Seed a baseline commit so the cumulative "total" diff is what THIS loop
+  // changed. head() is null on a fresh shadow repo, and a null baseline makes
+  // filesChanged diff against the empty tree — reporting the entire workspace
+  // as changed. Silent (not via checkpoint(), which prints a line).
+  let loopStart: string | null = cp.available() ? cp.head() ?? cp.commit("loop start: baseline") : null;
   const checkpoint = (label: string) => {
     if (cp.available()) {
       const hash = cp.commit(label);

@@ -133,11 +133,18 @@ function checkShell(config: Config): Check {
 }
 
 function checkWorkspace(config: Config): Check {
+  // Prove writability with a real write, like checkDataDir: accessSync(W_OK)
+  // reports success on Windows for directories a deny-ACE or a read-only
+  // share will actually refuse — a false OK is the one answer a diagnostic
+  // must never give.
+  const probe = join(config.cwd, `.ap-doctor-${process.pid}`);
   try {
-    accessSync(config.cwd, constants.W_OK);
+    writeFileSync(probe, "ok");
     return ok("workspace", config.cwd);
-  } catch {
-    return warn("workspace", `${config.cwd} is not writable — the agent can read but not edit here`, "run ap from a writable project directory");
+  } catch (e) {
+    return warn("workspace", `${config.cwd} is not writable (${(e as Error).message}) — the agent can read but not edit here`, "run ap from a writable project directory");
+  } finally {
+    try { rmSync(probe, { force: true }); } catch {}
   }
 }
 

@@ -26,7 +26,10 @@ const FRONT_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?/;
 
 function parseAgentFile(path: string, source: string): AgentDef | null {
   let raw: string;
-  try { raw = readFileSync(path, "utf8"); } catch { return null; }
+  // Strip a UTF-8 BOM before matching frontmatter: with one present the `---`
+  // opener never matches, so the whole block is silently ignored — a
+  // tools:-restricted agent would quietly run with the FULL mutating toolset.
+  try { raw = readFileSync(path, "utf8").replace(/^﻿/, ""); } catch { return null; }
   const m = raw.match(FRONT_RE);
   const fm: Record<string, string> = {};
   if (m) {
