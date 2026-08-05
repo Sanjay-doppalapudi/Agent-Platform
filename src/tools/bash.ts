@@ -11,7 +11,7 @@
 //      background logs confined to the user's data dir with 7-day pruning
 // Run genuinely untrusted code in a container/VM, not behind these checks.
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, openSync, readdirSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { isInsideRoots, isPrivatePath, readRoots, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
@@ -180,14 +180,35 @@ export async function bashTool(
       }
     } catch {}
     const logFile = join(logDir, `bg-${Date.now()}.log`);
-    const fd = openSync(logFile, "a");
-    const child = spawn(prefix[0]!, [...prefix.slice(1), args.cmd], {
+    // Redirect INSIDE the shell command, not via an inherited fd: on Windows
+    // a raw fd passed through stdio is silently dropped for detached children
+    // (verified with both node:child_process and Bun.spawn — logs stayed 0
+    // bytes), so the shell itself must open the file.
+    const redirected =
+      prefix[0]!.includes("powershell")
+        ? `& { ${args.cmd} } *> "${logFile}"`
+        : prefix[0]!.includes("cmd")
+          ? `( ${args.cmd} ) > "${logFile}" 2>&1`
+          : `{ ${args.cmd} ; } > "${logFile.replace(/\\/g, "/")}" 2>&1`;
+    const child = spawn(prefix[0]!, [...prefix.slice(1), redirected], {
       cwd,
       detached: true,
-      stdio: ["ignore", fd, fd],
+      stdio: "ignore",
       windowsHide: true,
     });
     child.unref();
+    // Register it so /ps (and `ap ps`) can find, tail, and kill it later —
+    // detached children outlive this process and would otherwise be orphans.
+    if (!ctx.config.light && child.pid) {
+      const { recordBackground } = await import("../bg.ts");
+      recordBackground(ctx.config, {
+        pid: child.pid,
+        cmd: args.cmd.replace(/\s+/g, " ").slice(0, 200),
+        cwd,
+        log: logFile,
+        sessionId: ctx.config.sessionId ?? null,
+      });
+    }
     return `started background process pid=${child.pid} log=${logFile}`;
   }
 

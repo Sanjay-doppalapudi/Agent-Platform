@@ -56,7 +56,7 @@ function rowsUp(s: string): number {
 const BUILTIN_CMDS = new Set([
   "exit", "q", "quit", "new", "resume", "session", "sessions", "sandbox",
   "model", "models", "mode", "plan", "code", "system", "context", "agents", "effort",
-  "undo", "diff", "checkpoints", "restore", "worktree", "compact", "share",
+  "undo", "diff", "checkpoints", "restore", "worktree", "compact", "share", "ps",
 ]);
 
 const COMMANDS: SlashCommand[] = [
@@ -70,6 +70,7 @@ const COMMANDS: SlashCommand[] = [
   { name: "/sessions", desc: "list recent sessions" },
   { name: "/sandbox", desc: "show or toggle the write-sandbox", hasArg: true },
   { name: "/agents", desc: "list subagents spawned this session" },
+  { name: "/ps", desc: "background processes: list | tail <pid> | kill <pid>", hasArg: true },
   { name: "/skills", desc: "list available SKILL.md packs" },
   { name: "/mcp", desc: "list MCP servers and their tools" },
   { name: "/undo", desc: "restore the previous checkpoint" },
@@ -668,6 +669,30 @@ export async function replMain(flags: CliFlags) {
             const mark = s.status === "running" ? yellow("●") : s.status === "done" ? green("✓") : red("✗");
             console.log(`${mark} #${s.id} ${dim(`[${s.status}]`)} ${s.task} ${dim(`· ${s.steps} steps · ${secs}s`)}`);
           }
+          continue;
+        }
+        case "ps": {
+          const { listBackground, tailLog, killBackground, formatBytes } = await import("./bg.ts");
+          const sub = rest[0];
+          if (sub === "kill" && rest[1]) {
+            const r = killBackground(config, Number(rest[1]));
+            console.log(dim(r.message));
+            continue;
+          }
+          const rows = listBackground(config);
+          if (sub === "tail") {
+            const pick = rest[1] ? rows.find((r) => r.pid === Number(rest[1])) : rows.find((r) => r.alive) ?? rows[0];
+            if (!pick) { console.log(dim(rest[1] ? `no background process with pid ${rest[1]}` : "no background processes")); continue; }
+            console.log(dim(`— ${pick.cmd} (pid ${pick.pid}) · ${pick.log} —`));
+            console.log(tailLog(pick.log, Number(rest[2]) || 40));
+            continue;
+          }
+          if (!rows.length) { console.log(dim("no background processes — start one with bash background:true")); continue; }
+          for (const r of rows) {
+            const mark = r.alive ? green("●") : dim("○");
+            console.log(`${mark} ${cyan(String(r.pid))} ${r.cmd.slice(0, 60)} ${dim(`· ${r.alive ? "running" : "exited"} · ${formatBytes(r.bytes)} · ${new Date(r.at).toLocaleTimeString()}`)}`);
+          }
+          console.log(dim("/ps tail <pid> [lines] · /ps kill <pid>"));
           continue;
         }
         case "skills": {

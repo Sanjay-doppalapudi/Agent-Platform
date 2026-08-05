@@ -195,6 +195,7 @@ Usage:
   ap resume                pick a recent session to resume
   ap sessions [search q]   list sessions / full-text search them
   ap share [id]            export a transcript as one self-contained HTML file
+  ap ps [tail|kill <pid>]  background processes started with bash background:true
   ap prompt [--cwd dir]    print the exact system prompt for a directory
   ap tool <name> '<json>'  run one tool directly, no LLM (testing)
   ap help <command>        detailed help: ${Object.keys(HELP_TOPICS).join(" · ")}
@@ -404,6 +405,31 @@ Example:  ap mcp add fs bun x @modelcontextprotocol/server-filesystem .`);
 
     console.error(`usage: ap mcp [list] | ap mcp call <server> <tool> '<json>' | ap mcp add <name> <command...> [--url u] [--project] | ap mcp remove <name>`);
     process.exit(1);
+    break;
+  }
+  case "ps": {
+    const { loadConfig } = await import("./config.ts");
+    const { listBackground, tailLog, killBackground, formatBytes } = await import("./bg.ts");
+    const config = loadConfig(flags);
+    const sub = rest[0];
+    if (sub === "kill" && rest[1]) {
+      const r = killBackground(config, Number(rest[1]));
+      console.log(r.message);
+      process.exit(r.ok ? 0 : 1);
+    }
+    const rows = listBackground(config);
+    if (sub === "tail") {
+      const pick = rest[1] ? rows.find((r) => r.pid === Number(rest[1])) : rows.find((r) => r.alive) ?? rows[0];
+      if (!pick) { console.error(rest[1] ? `no background process with pid ${rest[1]}` : "no background processes"); process.exit(1); }
+      console.error(`— ${pick.cmd} (pid ${pick.pid}) · ${pick.log} —`);
+      console.log(tailLog(pick.log, Number(rest[2]) || 40));
+      break;
+    }
+    if (!rows.length) { console.log("no background processes"); break; }
+    for (const r of rows) {
+      console.log(`${r.alive ? "●" : "○"} ${r.pid}  ${r.cmd.slice(0, 60)}  ${r.alive ? "running" : "exited"} · ${formatBytes(r.bytes)} · ${r.log}`);
+    }
+    console.log(`\nap ps tail <pid> [lines] · ap ps kill <pid>`);
     break;
   }
   case "share": {
