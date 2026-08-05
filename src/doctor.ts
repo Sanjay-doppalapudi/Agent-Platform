@@ -5,7 +5,7 @@
 // call except an explicit --probe. Never on the startup path.
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Config } from "./config.ts";
+import { resolveProvider, type Config, type ResolvedProvider } from "./config.ts";
 
 export type CheckState = "ok" | "warn" | "fail";
 
@@ -148,6 +148,51 @@ function checkWorkspace(config: Config): Check {
   }
 }
 
+/**
+ * Does the key actually WORK? A resolvable key is not a working key: a
+ * revoked/blocked key passes every static check and then fails every turn,
+ * which is exactly the "all checks passed but nothing works" report this
+ * command exists to prevent. Costs one 1-token request.
+ */
+async function checkAuth(config: Config): Promise<Check> {
+  let provider: ResolvedProvider;
+  try {
+    provider = resolveProvider(config, {} as any);
+  } catch (e) {
+    return fail("auth", (e as Error).message, "fix the provider/key checks above first");
+  }
+  let res: Response;
+  try {
+    res = await fetch(`${provider.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${provider.apiKey}`, ...provider.headers },
+      body: JSON.stringify({ model: provider.model, messages: [{ role: "user", content: "hi" }], max_tokens: 1 }),
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch (e) {
+    return warn("auth", `could not reach the provider — ${(e as Error).message}`, "check your network/proxy, then re-run ap doctor");
+  }
+  if (res.ok) {
+    res.body?.cancel();
+    return ok("auth", `${provider.name} accepted the key (${provider.model})`);
+  }
+  const body = (await res.text().catch(() => "")).slice(0, 200);
+  if (res.status === 401 || res.status === 403) {
+    return fail(
+      "auth",
+      `${provider.name} REJECTED the key — HTTP ${res.status} ${body}`,
+      `the key resolves but the provider refuses it: revoked, out of credits, or the account is blocked. Get a fresh key, then — if it came from an env var — update THAT (an env var overrides "ap auth"): setx ${config.providers[provider.name]?.apiKeyEnv ?? "PROVIDER_API_KEY"} "sk-new-key"  (then open a new terminal)`,
+    );
+  }
+  if (res.status === 429) {
+    return warn("auth", `rate limited (HTTP 429) — the key is valid`, "wait a moment, or switch model/provider for now");
+  }
+  if (res.status === 404) {
+    return fail("auth", `HTTP 404 for ${provider.model} at ${provider.baseUrl}`, `the model id or base URL is wrong — ap models ${provider.model.split("/").pop()}`);
+  }
+  return warn("auth", `HTTP ${res.status} ${body}`, "the provider returned an unexpected status — retry, or check its status page");
+}
+
 /** Network reachability of the active provider's base URL (HEAD, 5s). */
 async function checkEndpoint(config: Config): Promise<Check> {
   const active = process.env.HARNESS_PROVIDER || config.provider;
@@ -194,7 +239,10 @@ export async function runChecks(config: Config, opts: { mcp?: boolean; net?: boo
     checkKey(config),
     checkCredentials(config),
   ];
-  if (opts.net !== false) checks.push(await checkEndpoint(config));
+  if (opts.net !== false) {
+    checks.push(await checkEndpoint(config));
+    checks.push(await checkAuth(config)); // the check that would have caught a dead key
+  }
   if (opts.mcp !== false && !config.light) checks.push(await checkMcp(config));
   return checks;
 }

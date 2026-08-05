@@ -69,6 +69,10 @@ function capLines(lines: string[], max: number): { shown: string[]; hidden: numb
 // intuition dies; one dim "fix:" line revives it. First match wins.
 const ERROR_HINTS: [RegExp, string][] = [
   [/no api key/i, "fix: ap auth <provider>"],
+  // A present-but-rejected key is NOT a missing key — saying "missing or
+  // wrong" sends people to re-enter a key they already have.
+  [/blocked by upstream|autherror|revoked|insufficient[_ ]quota|billing|credit/i,
+    "fix: the provider REJECTED this key (revoked, out of credits, or account blocked) — get a fresh key; if it comes from an env var, update that (env wins over `ap auth`). Run: ap doctor"],
   // Model errors first: some providers wrap them in a 401/403 status.
   [/model\b.*(not (found|supported|available)|does not exist|unknown|invalid)/i, "fix: /models <query> to find a valid id, then /model <provider>/<model>"],
   [/\b401\b|unauthorized|invalid[_ ]?api[_ ]?key|incorrect api key/i, "fix: the key is missing or wrong — ap auth <provider>"],

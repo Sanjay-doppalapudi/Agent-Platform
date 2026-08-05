@@ -428,7 +428,7 @@ Example:  ap mcp add fs bun x @modelcontextprotocol/server-filesystem .`);
     console.log(
       state === "ok"
         ? `\n${paint(t.success, "all checks passed")} — you're ready: run "ap" in a project directory`
-        : `\n${bad} check${bad === 1 ? "" : "s"} need attention (see → lines above)`,
+        : `\n${bad} check${bad === 1 ? " needs" : "s need"} attention (see → lines above)`,
     );
     process.exit(state === "fail" ? 1 : 0);
   }
