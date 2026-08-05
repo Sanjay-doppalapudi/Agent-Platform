@@ -28,7 +28,9 @@ const DANGEROUS: [RegExp, string][] = [
   [/remove-item\b[^&|;]*-recurse[^&|;]*([A-Za-z]:[\\/]|\\\\)/i, "recursive Remove-Item on an absolute path"],
   [/\bmkfs\b/, "filesystem format"],
   [/\bdd\s+[^&|;]*of=\/dev\//, "raw disk write"],
-  [/\bshutdown\b/i, "system shutdown/restart"],
+  // Command position only (start / after ;|&& / sudo) — mentioning the word
+  // in an echo or commit message is not an attempt to run it.
+  [/(^|[;&|]\s*|\bsudo\s+)shutdown\b/i, "system shutdown/restart"],
   [/\btaskkill\b[^&|;]*\/f[^&|;]*\/im/i, "force-kill processes by name"],
   [/:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;/, "fork bomb"],
   [/\b(curl|wget|irm|iwr)\b[^&|;]*\|\s*(bash|sh|iex|powershell)/i, "piping a download straight into a shell"],

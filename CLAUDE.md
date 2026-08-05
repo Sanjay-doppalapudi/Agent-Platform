@@ -10,7 +10,8 @@ Agent Platform (`ap`) — a minimal coding-agent CLI optimized for raw speed. Bu
 
 ```sh
 bun run dev              # run from source (bun run src/index.ts)
-bun x tsc --noEmit       # typecheck — run after every change; there are no unit tests
+bun x tsc --noEmit       # typecheck — run after every change
+bun test tests           # unit tests (pure/local: registry, permissions, guard patterns, session crash-safety, catalog helpers) — release-gated in CI
 bun run compile          # build ap.exe + prewarm run (Defender scans happen at build time, not first launch)
 bun run dist             # cross-compile all four platform binaries into dist/
 bun run src/index.ts tool grep '{"pattern":"foo"}'   # exercise one tool directly, no LLM call
