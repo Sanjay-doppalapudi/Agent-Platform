@@ -367,14 +367,20 @@ export async function replMain(flags: CliFlags) {
       await streamChat(provider, msgs, [], (d) => { summary += d; }, undefined, undefined, undefined, config.streamIdleSeconds * 1000);
       spinner.stop();
       const old = session.id;
-      session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
+      session = Session.create(config.dataDir, {
+        cwd: config.cwd,
+        model: provider.model,
+        at: new Date().toISOString(),
+        checkpointId: cpSessionId, // keep /undo reachable across compaction
+      });
       config.sessionId = session.id;
       sessionAllows = new Set();
       spend.prompt = spend.cached = spend.completion = 0;
-      cp = new Checkpoints(config, session.id);
+      // NB: cp is deliberately NOT rebound — rebinding created an empty repo
+      // and silently orphaned every checkpoint made before the compaction.
       session.append({ role: "user", content: `[Compacted context from session ${old}]\n${summary.trim()}` });
       session.append({ role: "assistant", content: "Context loaded — continuing from the summary." });
-      console.log(dim(`compacted ${old} → new session ${session.id} (${summary.length} chars of summary)`));
+      console.log(dim(`compacted ${old} → new session ${session.id} (${summary.length} chars of summary) · checkpoint history preserved (/undo still works)`));
       return true;
     } catch (e) {
       spinner.stop();
@@ -388,8 +394,15 @@ export async function replMain(flags: CliFlags) {
   let sessionAllows = new Set<string>();
   let permitChain: Promise<unknown> = Promise.resolve();
 
-  let cp = new Checkpoints(config, session.id);
+  // The checkpoint repo is keyed by its OWN id, not the session id: /compact
+  // starts a fresh session but must keep the existing undo trail reachable.
+  // Resuming reads it back from the session meta so it survives a restart.
+  let cpSessionId = session.meta?.checkpointId ?? session.id;
+  let cp = new Checkpoints(config, cpSessionId);
   const originalCwd = config.cwd;
+  if (session.recovered) {
+    console.log(yellow(`⚠ session ${session.id} had a damaged line (crash mid-write) — it was skipped; the rest loaded fine`));
+  }
 
   // MCP servers connect in the background while the user types; the promise
   // is awaited before the first turn so the tool list is complete + frozen.
@@ -537,7 +550,8 @@ export async function replMain(flags: CliFlags) {
           config.sessionId = session.id;
           sessionAllows = new Set();
           spend.prompt = spend.cached = spend.completion = 0;
-          cp = new Checkpoints(config, session.id);
+          cpSessionId = session.id;
+          cp = new Checkpoints(config, cpSessionId);
           console.log(dim(`new session ${session.id}`));
           continue;
         case "resume":
@@ -546,7 +560,8 @@ export async function replMain(flags: CliFlags) {
             config.sessionId = session.id;
             sessionAllows = new Set();
             spend.prompt = spend.cached = spend.completion = 0;
-            cp = new Checkpoints(config, session.id);
+            cpSessionId = session.meta?.checkpointId ?? session.id;
+            cp = new Checkpoints(config, cpSessionId);
             console.log(dim(`resumed ${session.id} (${session.history.length} msgs)`));
           } catch (e) { console.log(dim((e as Error).message)); }
           continue;
@@ -827,6 +842,7 @@ export async function replMain(flags: CliFlags) {
             console.log(dim(r.stdout?.toString().trim() || "none"));
           } else if (sub === "back") {
             config.cwd = originalCwd;
+            cp = new Checkpoints(config, cpSessionId); // work-tree is snapshotted at construction
             console.log(dim(`cwd → ${originalCwd}`));
           } else if (sub === "merge") {
             const slug = rest[1];
@@ -849,6 +865,7 @@ export async function replMain(flags: CliFlags) {
             const r = Bun.spawnSync(["git", "-C", originalCwd, "worktree", "add", dir, "-b", `ap/${slug}`], { stdout: "pipe", stderr: "pipe" });
             if (r.exitCode !== 0) { console.log(dim((r.stderr?.toString() ?? "worktree add failed").trim().slice(0, 300))); continue; }
             config.cwd = dir;
+            cp = new Checkpoints(config, `${cpSessionId}-${slug}`); // own chain per worktree
             console.log(dim(`worktree ready: branch ap/${slug} · cwd → ${dir}`));
             console.log(dim(`/worktree back to return · /worktree merge ${slug} when done`));
           }

@@ -8,10 +8,19 @@ export interface SessionMeta {
   cwd: string;
   model: string;
   at: string;
+  /** Shadow-git checkpoint repo this session continues (set by /compact) so
+   *  the undo trail survives compaction and restarts. */
+  checkpointId?: string;
 }
 
 export class Session {
   history: Msg[] = [];
+  meta: SessionMeta | null = null;
+  /** A line failed to parse on load, or a torn tail was repaired. */
+  recovered = false;
+  /** The file does not end in a newline (crash mid-write). */
+  private torn = false;
+
   constructor(
     public id: string,
     private file: string,
@@ -19,7 +28,11 @@ export class Session {
 
   append(msg: Msg) {
     this.history.push(msg);
-    appendFileSync(this.file, JSON.stringify({ t: "msg", ...msg }) + "\n");
+    // A torn tail must be terminated in the SAME write, otherwise this record
+    // concatenates onto the fragment and both become one unparsable line —
+    // silently deleting this message from every future load.
+    appendFileSync(this.file, (this.torn ? "\n" : "") + JSON.stringify({ t: "msg", ...msg }) + "\n");
+    this.torn = false;
   }
 
   static dir(dataDir: string): string {
@@ -40,15 +53,26 @@ export class Session {
     const file = join(Session.dir(dataDir), `${id}.jsonl`);
     if (!existsSync(file)) throw new Error(`session not found: ${id}`);
     const s = new Session(id, file);
-    for (const line of readFileSync(file, "utf8").split("\n")) {
+    const raw = readFileSync(file, "utf8");
+    // Repair lazily on the next append, never here: loads must not touch the
+    // file, because list()/latest() rank by mtime and merely viewing an old
+    // session would then hijack `ap --continue`.
+    s.torn = raw.length > 0 && !raw.endsWith("\n");
+    if (s.torn) s.recovered = true;
+    for (const line of raw.split("\n")) {
       if (!line.trim()) continue;
       try {
         const obj = JSON.parse(line);
         if (obj.t === "msg") {
           const { t, ...msg } = obj;
           s.history.push(msg as Msg);
+        } else if (obj.t === "meta") {
+          const { t, ...meta } = obj;
+          s.meta = meta as SessionMeta;
         }
-      } catch {} // partial trailing line — ignore
+      } catch {
+        s.recovered = true; // partial/corrupt line — skipped, reported once
+      }
     }
     return s;
   }

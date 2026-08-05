@@ -22,8 +22,16 @@ export class Checkpoints {
   private gitDir: string;
   private ready = false;
 
+  /** Work-tree is SNAPSHOTTED at construction. It used to be read from
+   *  config.cwd on every call, so /worktree (which mutates config.cwd in
+   *  place) pointed an existing checkpoint history at a different directory:
+   *  commits recorded every original-directory file as deleted, and a later
+   *  /undo could overwrite the main checkout with a worktree snapshot. */
+  private workTree: string;
+
   constructor(private config: Config, private sessionId: string) {
     this.gitDir = join(config.dataDir, "checkpoints", sessionId);
+    this.workTree = config.cwd;
   }
 
   available(): boolean {
@@ -41,11 +49,11 @@ export class Checkpoints {
       const excludes = [".git/", ...HARD_IGNORES.map((d) => `${d}/`), ...this.config.ignore.map((d) => `${d}/`)];
       mkdirSync(join(this.gitDir, "info"), { recursive: true });
       writeFileSync(join(this.gitDir, "info", "exclude"), excludes.join("\n") + "\n");
-      git(this.gitDir, this.config.cwd, ["config", "core.autocrlf", "false"]);
+      git(this.gitDir, this.workTree, ["config", "core.autocrlf", "false"]);
       // `git clean` (and friends) refuse to run when core.bare=true — the
       // shadow repo is bare-initialized but always used with a work-tree.
-      git(this.gitDir, this.config.cwd, ["config", "core.bare", "false"]);
-      git(this.gitDir, this.config.cwd, ["config", "core.worktree", this.config.cwd]);
+      git(this.gitDir, this.workTree, ["config", "core.bare", "false"]);
+      git(this.gitDir, this.workTree, ["config", "core.worktree", this.workTree]);
     }
     this.ready = true;
     return true;
@@ -54,7 +62,7 @@ export class Checkpoints {
   /** Commit the current workspace state. Returns short hash or null. */
   commit(label: string): string | null {
     if (!this.ensure()) return null;
-    const w = this.config.cwd;
+    const w = this.workTree;
     if (!git(this.gitDir, w, ["add", "-A", "."]).ok) return null;
     const staged = git(this.gitDir, w, ["diff", "--cached", "--quiet"]);
     if (staged.ok) return null; // nothing changed
@@ -66,7 +74,7 @@ export class Checkpoints {
   /** Newest-first list of {hash, label}. */
   list(limit = 15): { hash: string; label: string }[] {
     if (!this.ensure()) return [];
-    const r = git(this.gitDir, this.config.cwd, ["log", "--format=%h%x09%s", `-${limit}`]);
+    const r = git(this.gitDir, this.workTree, ["log", "--format=%h%x09%s", `-${limit}`]);
     if (!r.ok || !r.out) return [];
     return r.out.split("\n").map((l) => {
       const tab = l.indexOf("\t");
@@ -77,7 +85,7 @@ export class Checkpoints {
   /** Restore the workspace to a checkpoint (files tracked then; extras cleaned). */
   restore(hash: string): string | null {
     if (!this.ensure()) return null;
-    const w = this.config.cwd;
+    const w = this.workTree;
     // read-tree makes the INDEX match the target (checkout -- . would leave
     // later-added files tracked, so clean couldn't remove them).
     if (!git(this.gitDir, w, ["read-tree", hash]).ok) return null;
@@ -89,7 +97,7 @@ export class Checkpoints {
   /** Short hash of the latest checkpoint, or null before the first commit. */
   head(): string | null {
     if (!this.ensure()) return null;
-    const r = git(this.gitDir, this.config.cwd, ["rev-parse", "--short", "HEAD"]);
+    const r = git(this.gitDir, this.workTree, ["rev-parse", "--short", "HEAD"]);
     return r.ok && r.out ? r.out : null;
   }
 
@@ -99,7 +107,7 @@ export class Checkpoints {
    * (committed + pending merged). from=null → since the first checkpoint. */
   filesChanged(from: string | null): { file: string; add: string; del: string }[] {
     if (!this.ensure()) return [];
-    const w = this.config.cwd;
+    const w = this.workTree;
     const acc = new Map<string, { add: number; del: number; bin: boolean }>();
     const ingest = (args: string[]) => {
       const r = git(this.gitDir, w, ["diff", "--numstat", ...args]);
@@ -126,7 +134,7 @@ export class Checkpoints {
   /** Diff between checkpoints (n back → HEAD) plus uncommitted changes. */
   diff(back = 1, maxBytes = 30_000): string {
     if (!this.ensure()) return "(checkpoints unavailable)";
-    const w = this.config.cwd;
+    const w = this.workTree;
     const committed = git(this.gitDir, w, ["diff", "--stat", "--patch", `HEAD~${back}`, "HEAD"], false);
     const pending = git(this.gitDir, w, ["diff", "--stat", "--patch", "HEAD"], false);
     let out = "";

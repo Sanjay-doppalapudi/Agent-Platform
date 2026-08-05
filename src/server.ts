@@ -20,6 +20,8 @@ interface Live {
   session: Session;
   cwd: string;
   chain: Promise<unknown>; // one run at a time per session
+  ctrl?: AbortController; // the currently executing run
+  closed?: boolean; // DELETE received: refuse new work, let the current run drain
 }
 
 export async function serveMain(flags: CliFlags) {
@@ -116,7 +118,17 @@ export async function serveMain(flags: CliFlags) {
         if (req.method === "GET" && sub === "messages") return json(live.session.history);
 
         if (req.method === "DELETE" && !sub) {
+          // Order matters. Detach FIRST (synchronously) so no request can
+          // attach to this Live or enqueue onto its chain while we drain;
+          // then abort; then wait for the aborted run's final appends
+          // (including the cancellation tool results) to land while the file
+          // still exists; only then unlink. Deleting first let the running
+          // turn's appendFileSync recreate the file as a corrupt, meta-less
+          // transcript that then showed up in the resume picker.
           sessions.delete(id);
+          live.closed = true;
+          live.ctrl?.abort();
+          await live.chain.catch(() => {});
           Session.delete(baseConfig.dataDir, id);
           return json({ ok: true });
         }
@@ -137,8 +149,11 @@ export async function serveMain(flags: CliFlags) {
           const extra = body.response_format ? { response_format: body.response_format } : undefined;
           const permit = body.allowOutside ? async () => true : undefined; // undefined → auto-deny
 
+          if (live.closed) return json({ error: "session closed" }, 410);
           const run = live.chain.then(async () => {
+            if (live!.closed) throw new Error("session closed"); // queued while deleting
             const ctrl = new AbortController();
+            live!.ctrl = ctrl; // visible to DELETE, which must be able to abort it
             const text = await runTurn(
               config, prov, live!.session, body.text!,
               broadcast(id), ctrl.signal,

@@ -147,6 +147,11 @@ export async function runTurn(
       if (pe.retryable && pe.midStream && !midStreamRetried && !signal.aborted) {
         midStreamRetried = true;
         emit({ type: "error", message: `${pe.message} — retrying the request`, retryable: true });
+        // Partial text has reached every consumer (pipe, editor, SSE) and cannot
+        // be retracted, so mark the boundary in-band on the SAME channel —
+        // otherwise the retry's answer reads as a continuation of the truncated
+        // one ("Let me check the confLet me check the config file…").
+        emit({ type: "text", delta: "\n\n[stream interrupted — the partial answer above is discarded; retrying]\n\n" });
         await new Promise((r) => setTimeout(r, 1000));
         iter--;
         continue;

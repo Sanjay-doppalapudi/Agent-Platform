@@ -110,17 +110,23 @@ export async function streamChat(
       lastErr = new ProviderError("empty response body", 0, true);
       continue;
     }
-    // Once we start consuming the stream we no longer retry HERE — the agent
-    // loop owns mid-stream retries (tagged via midStream).
+    // `midStream` must mean "text already reached the user", because that is
+    // the only case a retry can duplicate. Count emitted characters: a failure
+    // before the first content token is retried HERE, invisibly, with no
+    // duplication — that covers the common stall/dropped-connection case.
+    let emitted = 0;
+    const tap = (d: string) => { emitted += d.length; onText(d); };
     try {
-      return await consumeSSE(res.body, onText, signal, onReasoning, idleTimeoutMs);
+      return await consumeSSE(res.body, tap, signal, onReasoning, idleTimeoutMs);
     } catch (e) {
       if (signal?.aborted) throw new ProviderError("aborted", 0, false);
-      // Nothing was emitted, so retrying cannot duplicate output: retry HERE
-      // rather than surfacing a spurious empty turn.
-      if (e instanceof StreamEmptyError) { lastErr = new ProviderError(e.message, 0, true); continue; }
-      if (e instanceof StreamStallError) throw new ProviderError(e.message, 0, true, true);
-      throw new ProviderError(`stream failed: ${(e as Error).message}`, 0, true, true);
+      const msg = e instanceof StreamStallError || e instanceof StreamEmptyError
+        ? e.message
+        : `stream failed: ${(e as Error).message}`;
+      if (emitted === 0) { lastErr = new ProviderError(msg, 0, true); continue; }
+      // Text is already on a pipe / in the editor / in the SSE feed and cannot
+      // be retracted — hand it to the agent loop, which marks the boundary.
+      throw new ProviderError(msg, 0, true, true);
     }
   }
   throw lastErr ?? new ProviderError("request failed", 0, true);
