@@ -1,6 +1,40 @@
 // Themes + input frame geometry (pure string work — no terminal needed).
 import { describe, expect, test } from "bun:test";
-import { currentTheme, EFFORT_LEVELS, frameBottom, frameTop, frameWidth, paint, parseEffort, setTheme, THEMES, themeNames } from "../src/theme.ts";
+import { currentTheme, cursorGeometry, EFFORT_LEVELS, frameBottom, frameTop, frameWidth, paint, parseEffort, setTheme, THEMES, themeNames } from "../src/theme.ts";
+import { MdRenderer } from "../src/md.ts";
+
+describe("markdown nesting (regression)", () => {
+  const render = (src: string) => new MdRenderer().push(src + "\n");
+
+  test("bold survives an inline code span inside it", () => {
+    const out = render("**use `foo` carefully**");
+    // A blanket reset would end the bold at the code span; the closer must be
+    // attribute-specific so "carefully" is still bold.
+    expect(out).toContain("\x1b[1m"); // bold opened
+    const afterCode = out.slice(out.indexOf("foo"));
+    expect(afterCode).not.toContain("\x1b[0m\x1b[22m"); // no blanket reset before bold ends
+    expect(out.indexOf("\x1b[22m")).toBeGreaterThan(out.indexOf("carefully"));
+  });
+
+  test("code spans reset only the foreground", () => {
+    const out = render("plain `code` plain");
+    expect(out).toContain("\x1b[39m");
+    expect(out).not.toContain("\x1b[0m\x1b[39m");
+  });
+
+  test("mono theme strips answer-text color too", () => {
+    setTheme("mono");
+    const out = render("# heading\n- bullet with `code`");
+    expect(out).not.toContain("\x1b[36m"); // no hardcoded cyan leaks through
+    setTheme("default");
+  });
+
+  test("code fences still render and toggle", () => {
+    const out = render("```ts\nconst x = 1;\n```");
+    expect(out).toContain("╭─ ts");
+    expect(out).toContain("╰─");
+  });
+});
 
 describe("frameBottom color integrity (regression)", () => {
   // The bottom edge lost its color partway across: wrapping the WHOLE line in
@@ -39,6 +73,33 @@ describe("frameBottom color integrity (regression)", () => {
     const out = frameBottom(20, "", border);
     expect(out.startsWith("\x1b[2;36m╰")).toBe(true);
     expect(out).toContain("╯\x1b[0m");
+  });
+});
+
+describe("cursorGeometry (wrapped-input regression)", () => {
+  // The input line wrapping is what actually shredded the box: the renderer
+  // assumed prompt+buf was always exactly one row.
+  test("short input stays on row 0", () => {
+    expect(cursorGeometry(10, 80)).toEqual({ rows: 0, col: 10 });
+  });
+  test("deferred wrap: exactly cols chars stays on the same row", () => {
+    // The terminal parks the cursor on the LAST column, it does not wrap yet.
+    expect(cursorGeometry(80, 80)).toEqual({ rows: 0, col: 80 });
+  });
+  test("one past the width moves to the next row, column 1", () => {
+    expect(cursorGeometry(81, 80)).toEqual({ rows: 1, col: 1 });
+  });
+  test("multiple wraps", () => {
+    expect(cursorGeometry(200, 80)).toEqual({ rows: 2, col: 40 });
+    expect(cursorGeometry(160, 80)).toEqual({ rows: 1, col: 80 });
+    expect(cursorGeometry(161, 80)).toEqual({ rows: 2, col: 1 });
+  });
+  test("empty input emits no cursor movement", () => {
+    expect(cursorGeometry(0, 80)).toEqual({ rows: 0, col: 0 });
+  });
+  test("degenerate widths never divide by zero", () => {
+    expect(cursorGeometry(5, 0).rows).toBeGreaterThanOrEqual(0);
+    expect(() => cursorGeometry(5, 1)).not.toThrow();
   });
 });
 

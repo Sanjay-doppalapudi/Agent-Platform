@@ -300,36 +300,42 @@ export async function replMain(flags: CliFlags) {
   let pricing: import("./models.ts").Pricing | null = null;
   let pricedFor = "";
 
-  const buildStatus = (): string => {
-    const parts: string[] = [dim(`${provider.name}/${provider.model}`)];
-    if (effort) parts.push(dim(`effort ${effort}`));
+  /** `muted` paints the low-emphasis segments. Inside the frame it is the
+   *  border color, so the status reads as part of the border instead of a
+   *  white band across the bottom edge; standalone it is plain dim. */
+  const buildStatus = (inFrame = false): string => {
+    const muted = inFrame ? edge : dim;
+    const parts: string[] = [muted(`${provider.name}/${provider.model}`)];
+    if (effort) parts.push(muted(`effort ${effort}`));
     let chars = 0;
     try {
       chars = buildSystemPrompt(config).length;
       for (const m of session.history) chars += JSON.stringify(m).length;
     } catch {}
     const pct = Math.min(999, Math.round((chars / config.contextBudgetChars) * 100));
-    parts.push(pct >= 85 ? red(`ctx ${pct}%`) : pct >= 60 ? yellow(`ctx ${pct}%`) : dim(`ctx ${pct}%`));
+    parts.push(pct >= 85 ? red(`ctx ${pct}%`) : pct >= 60 ? yellow(`ctx ${pct}%`) : muted(`ctx ${pct}%`));
     if (pricing && (spend.prompt || spend.completion)) {
       const usd =
         ((spend.prompt - spend.cached) * pricing.input +
           spend.cached * (pricing.cacheRead ?? pricing.input) +
           spend.completion * pricing.output) / 1e6;
-      if (usd > 0) parts.push(dim(`~$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(3)}`));
+      if (usd > 0) parts.push(muted(`~$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(3)}`));
     }
     const subs = listSubagents();
     if (subs.length) {
       const dots = subs.slice(-8).map((s) =>
         s.status === "running" ? yellow("●") : s.status === "done" ? green("●") : red("●")).join("");
-      parts.push(`${dim(`◇ ${subs.length}`)} ${dots} ${dim("/agents")}`);
+      parts.push(`${muted(`◇ ${subs.length}`)} ${dots} ${muted("/agents")}`);
     }
-    return parts.join(dim(" · "));
+    return parts.join(muted(" · "));
   };
   // Re-evaluated per keypress render — memoized so typing costs nothing.
-  let statusCache = { at: 0, s: "" };
-  const statusFor = (): string => {
+  let statusCache = { at: 0, s: "", frame: false };
+  const statusFor = (inFrame = false): string => {
     const now = performance.now();
-    if (now - statusCache.at > 1000) statusCache = { at: now, s: buildStatus() };
+    if (now - statusCache.at > 1000 || statusCache.frame !== inFrame) {
+      statusCache = { at: now, s: buildStatus(inFrame), frame: inFrame };
+    }
     return statusCache.s;
   };
 
@@ -481,7 +487,6 @@ export async function replMain(flags: CliFlags) {
       ? `${edge("│")} ${cyan("›")} `
       : `${dim(config.mode)} ${cyan("›")} `;
     process.stdout.write("\n");
-    if (framed) console.log(edge(frameTop(frameWidth(), config.mode)));
     let input = (await readLine({
       prompt: promptLabel,
       commands: menuCommands,
@@ -498,7 +503,10 @@ export async function replMain(flags: CliFlags) {
           .map((f) => f.replace(/\\/g, "/"));
       },
       onCtrlO: () => toggleVerbose(true),
-      status: config.light ? undefined : () => (framed ? frameBottom(frameWidth(), statusFor(), edge) : `  ${statusFor()}`),
+      // readLine owns the frame: it redraws the top edge on every render, so
+      // the box survives resizes, wrapped input, and ctrl+o replays.
+      frameTop: framed ? () => edge(frameTop(frameWidth(), config.mode)) : undefined,
+      status: config.light ? undefined : () => (framed ? frameBottom(frameWidth(), statusFor(true), edge) : `  ${statusFor()}`),
     }));
     // Submitting erases the live status row (it is the bottom edge), so close
     // the box explicitly — otherwise the transcript keeps an open-ended frame.

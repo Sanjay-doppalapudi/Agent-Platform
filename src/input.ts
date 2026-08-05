@@ -4,8 +4,10 @@
 // ↑/↓ recall history when no menu is open.
 // Caller must have run readline.emitKeypressEvents(process.stdin) once.
 
+import { currentTheme, cursorGeometry } from "./theme.ts";
+
 const R = "\x1b[0m";
-const DIM = "\x1b[2m";
+const DIM = () => currentTheme().dim; // theme-aware (mono/NO_COLOR → no codes)
 const INV = "\x1b[7m";
 
 export interface SlashCommand {
@@ -63,8 +65,11 @@ export function readLine(opts: {
   onCtrlO?: () => void;
   /** Status row rendered below the input line (may contain ANSI colors).
    *  A function is re-evaluated on every render (memoize if costly).
-   *  Hidden while a menu is open; cleared from the transcript on submit. */
+   *  Doubles as the frame's bottom edge, so it is drawn under menus too. */
   status?: string | (() => string);
+  /** Frame top edge, redrawn above the input on every render (so it survives
+   *  resizes and ctrl+o replays). Return "" to draw no frame. */
+  frameTop?: () => string;
 }): Promise<string | null> {
   const { prompt, commands, history } = opts;
   const promptLen = stripAnsi(prompt).length;
@@ -115,8 +120,26 @@ export function readLine(opts: {
       return null;
     };
 
+    // Rows ABOVE the cursor that belong to our drawing (the frame's top edge
+    // plus any rows the input wrapped onto). Every redraw rewinds by this
+    // before erasing — without it, a wrapped input leaves its first row
+    // stranded and the whole block marches one row down per keystroke.
+    let drawnAbove = 0;
+
+    const rewind = () => `${drawnAbove ? `\x1b[${drawnAbove}A` : ""}\r\x1b[J`;
+
     const render = () => {
-      let out = `\r\x1b[J${prompt}${buf}`;
+      const cols = Math.max(process.stdout.columns ?? 80, 20);
+      const top = opts.frameTop?.();
+      const { rows: inputRows, col } = cursorGeometry(promptLen + buf.length, cols);
+
+      // Redraw the frame top every time: that makes the box resize-correct and
+      // self-healing after anything above erases it (e.g. the ctrl+o replay).
+      let out = rewind();
+      if (top) out += `${top}\n`;
+      out += `${prompt}${buf}`;
+
+      let below = 0; // rows drawn BELOW the input's last row
       const menu = activeMenu();
       if (menu) {
         const items = menu.items;
@@ -125,31 +148,38 @@ export function readLine(opts: {
         // Sliding window keeps the selection visible.
         const start = Math.max(0, Math.min(menuIdx - (MENU_ROWS - 2), items.length - MENU_ROWS));
         const end = Math.min(items.length, start + MENU_ROWS);
-        let rows = 0;
-        if (start > 0) { out += `\n${DIM}  ↑ ${start} more${R}`; rows++; }
+        const rowWidth = Math.max(8, cols - 2); // never wider than the terminal
+        if (start > 0) { out += `\n${DIM()}  ↑ ${start} more${R}`; below++; }
         for (let i = start; i < end; i++) {
           const it = items[i]!;
           const line = ` ${it.label}${it.desc ? `  ${it.desc}` : ""} `;
-          out += `\n${i === menuIdx ? INV : DIM}${line.slice(0, Math.max(20, (process.stdout.columns ?? 80) - 2))}${R}`;
-          rows++;
+          out += `\n${i === menuIdx ? INV : DIM()}${line.slice(0, rowWidth)}${R}`;
+          below++;
         }
-        if (end < items.length) { out += `\n${DIM}  ↓ ${items.length - end} more${R}`; rows++; }
-        out += `\n${DIM}  ↑↓ move · Tab complete · Enter run · Esc close${R}`; rows++;
-        out += `\x1b[${rows}A\r\x1b[${promptLen + buf.length}C`;
-      } else if (opts.status) {
-        // Status row below the input; cursor returns wrap-aware.
-        const st = typeof opts.status === "function" ? opts.status() : opts.status;
-        const cols = Math.max(process.stdout.columns ?? 80, 20);
-        const len = stripAnsi(st).length;
-        const rows = 1 + Math.floor(Math.max(0, len - 1) / cols);
-        out += `\n${st}\x1b[${rows}A\r\x1b[${promptLen + buf.length}C`;
+        if (end < items.length) { out += `\n${DIM()}  ↓ ${items.length - end} more${R}`; below++; }
+        out += `\n${DIM()}  ↑↓ move · Tab complete · Enter run · Esc close${R}`; below++;
       }
+      // The status row is the frame's bottom edge, so draw it even with a menu
+      // open — otherwise opening the menu visibly removes the box's bottom.
+      if (opts.status) {
+        const st = typeof opts.status === "function" ? opts.status() : opts.status;
+        if (st) {
+          out += `\n${st}`;
+          below += 1 + cursorGeometry(stripAnsi(st).length, cols).rows;
+        }
+      }
+
+      if (below) out += `\x1b[${below}A`;
+      out += `\r${col ? `\x1b[${col}C` : ""}`;
+      drawnAbove = inputRows + (top ? 1 : 0);
       process.stdout.write(out);
     };
 
     const done = (result: string | null) => {
       stdin.removeListener("keypress", onKey);
-      process.stdout.write(`\r\x1b[J${prompt}${result ?? ""}\n`);
+      const top = opts.frameTop?.();
+      process.stdout.write(`${rewind()}${top ? `${top}\n` : ""}${prompt}${result ?? ""}\n`);
+      drawnAbove = 0;
       resolve(result);
     };
 
@@ -169,7 +199,10 @@ export function readLine(opts: {
         return;
       }
       if (key.ctrl && key.name === "o") {
-        process.stdout.write("\r\x1b[J");
+        // Erase our whole block (frame included) so the caller's replay starts
+        // from a clean row; render() then rebuilds the frame around it.
+        process.stdout.write(rewind());
+        drawnAbove = 0;
         opts.onCtrlO?.();
         render();
         return;

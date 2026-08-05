@@ -113,7 +113,22 @@ export function frameWidth(cols = process.stdout.columns ?? 80): number {
   return Math.max(28, Math.min(cols - 1, 160));
 }
 
-const visibleLen = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "").length;
+export const visibleLen = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "").length;
+
+/**
+ * Where the cursor ends up after printing `len` visible chars from column 0:
+ * `rows` = terminal rows consumed BELOW the first one, `col` = 1-based column
+ * on that last row (0 when nothing was printed).
+ *
+ * Deferred wrap matters here: after exactly `cols` characters the cursor sits
+ * on the last column of the SAME row, not column 0 of the next one — so the
+ * math is `(len - 1) / cols`, never `len / cols`.
+ */
+export function cursorGeometry(len: number, cols: number): { rows: number; col: number } {
+  const c = Math.max(1, cols);
+  const rows = Math.floor(Math.max(0, len - 1) / c);
+  return { rows, col: len - rows * c };
+}
 
 /**
  * Top edge: `╭─ label ─────────╮`. Plain string — the caller paints it.
