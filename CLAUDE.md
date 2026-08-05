@@ -24,6 +24,8 @@ Releases: `git tag v0.x.y && git push --tags` → `.github/workflows/release.yml
 
 On Windows, `bun build --compile` cannot overwrite a **running** ap.exe (EPERM) — rename it aside first (`Rename-Item ap.exe ap.exe.old-<stamp>`), then build.
 
+**Smart App Control / Device Guard blocks locally built binaries.** If `VerifiedAndReputablePolicyState` is 1 (`HKLM:\SYSTEM\CurrentControlSet\Control\CI\Policy`), a freshly compiled unsigned `ap.exe` will not launch ("blocked by your organization's Device Guard policy") even though the build succeeded — and if the repo dir is on PATH, rebuilding **breaks the user's `ap` command**. Verify changes by running from source (`bun src/index.ts …`) and use `ap.cmd` (a bun shim, committed) so `ap` keeps working; PATHEXT prefers `.EXE`, so the shim only takes effect when no runnable `ap.exe` is present.
+
 ## Architecture
 
 One process, one event stream. `agent.ts` runs the loop and emits `AgentEvent`s (`text`/`reasoning`/`tool_start`/`tool_end`/`turn_end`/`done`/`error`); every front-end — REPL (`repl.ts`), one-shot/NDJSON (`run.ts`), HTTP+SSE server (`server.ts`) — is just a different renderer of that same stream. To add a capability, emit an event; never print from inside the loop or tools.
