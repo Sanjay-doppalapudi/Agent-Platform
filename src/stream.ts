@@ -87,6 +87,15 @@ export class StreamStallError extends Error {
   }
 }
 
+/** Thrown when a 200 response carried no parsable SSE event at all — a proxy
+ *  that ignored stream:true, an upstream that closed at byte 0, or an error
+ *  frame we cannot read. Retryable: never a legitimate empty answer. */
+export class StreamEmptyError extends Error {
+  constructor() {
+    super("provider returned no stream events (empty or non-SSE response body)");
+  }
+}
+
 /**
  * Consume a chat-completions SSE body, emitting text deltas via onText and
  * returning the fully assembled response. Tolerates providers that send a
@@ -109,6 +118,14 @@ export async function consumeSSE(
   let finishReason: string | null = null;
   let usage: Usage | undefined;
   const calls = new Map<number, PartialCall>();
+  // Slot bookkeeping for providers that omit `index` on tool_calls (e.g. ones
+  // that deliver a complete `message` on the last chunk). Without this every
+  // index-free call landed in bucket 0 and they concatenated into one corrupt
+  // call named e.g. "readgrep".
+  const slotById = new Map<string, number>();
+  let nextSlot = 0;
+  let curSlot = -1; // most recently touched slot: continuation fragments belong here
+  let sawEvent = false;
 
   const abort = () => reader.cancel().catch(() => {});
   signal?.addEventListener("abort", abort, { once: true });
@@ -125,72 +142,98 @@ export async function consumeSSE(
     return Promise.race([reader.read(), stall]).finally(() => clearTimeout(timer!)) as ReturnType<typeof reader.read>;
   };
 
+  // One SSE line. Hoisted so the trailing buffer can be flushed after the read
+  // loop — a provider whose final `data:` line has no newline used to lose that
+  // entire event silently.
+  const handleLine = (rawLine: string): void => {
+    const line = rawLine.replace(/\r$/, "");
+    if (!line.startsWith("data:")) return;
+    const data = line.slice(5).trim();
+    if (!data) return;
+    if (data === "[DONE]") { sawEvent = true; return; }
+
+    let json: any;
+    try {
+      json = JSON.parse(data);
+    } catch {
+      return; // partial/garbage line — skip
+    }
+    sawEvent = true;
+
+    if (json.usage) {
+      usage = {
+        prompt: json.usage.prompt_tokens ?? 0,
+        completion: json.usage.completion_tokens ?? 0,
+        cached: json.usage.prompt_tokens_details?.cached_tokens,
+      };
+    }
+    const choice = json.choices?.[0];
+    if (!choice) return;
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+
+    const delta = choice.delta ?? choice.message; // some providers send message on last chunk
+    if (!delta) return;
+    // Provider-specific reasoning channels: surfaced to the UI, never
+    // stored in text (so never re-sent as history).
+    const reasoning = delta.reasoning_content ?? delta.reasoning;
+    if (typeof reasoning === "string" && reasoning.length > 0) {
+      onReasoning?.(reasoning);
+    }
+    if (typeof delta.content === "string" && delta.content.length > 0) {
+      const { out, think } = filter.push(delta.content);
+      if (think) onReasoning?.(think);
+      if (out) {
+        text += out;
+        onText(out);
+      }
+    }
+    if (Array.isArray(delta.tool_calls)) {
+      for (const tc of delta.tool_calls) {
+        // Three-way slotting: an explicit index wins; an unseen id starts a
+        // new slot; a fragment with neither continues the current slot
+        // (that is what plain argument-continuation deltas look like).
+        let idx: number;
+        if (typeof tc.index === "number") idx = tc.index;
+        else if (tc.id) idx = slotById.get(tc.id) ?? nextSlot++;
+        else idx = curSlot >= 0 ? curSlot : nextSlot++;
+        if (tc.id) slotById.set(tc.id, idx);
+        curSlot = idx;
+        if (idx >= nextSlot) nextSlot = idx + 1; // keep synthetic slots clear of provider indices
+        let partial = calls.get(idx);
+        if (!partial) {
+          partial = { id: "", name: "", args: "" };
+          calls.set(idx, partial);
+        }
+        if (tc.id) partial.id = tc.id;
+        if (tc.function?.name) partial.name += tc.function.name;
+        if (tc.function?.arguments) partial.args += tc.function.arguments;
+      }
+    }
+  };
+
   try {
     for (;;) {
       const { done, value } = await readChunk();
       if (done) break;
       buf += decoder.decode(value, { stream: true });
-
       let nl: number;
       while ((nl = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, nl).replace(/\r$/, "");
+        handleLine(buf.slice(0, nl));
         buf = buf.slice(nl + 1);
-        if (!line.startsWith("data:")) continue;
-        const data = line.slice(5).trim();
-        if (!data || data === "[DONE]") continue;
-
-        let json: any;
-        try {
-          json = JSON.parse(data);
-        } catch {
-          continue; // partial/garbage line — skip
-        }
-
-        if (json.usage) {
-          usage = {
-            prompt: json.usage.prompt_tokens ?? 0,
-            completion: json.usage.completion_tokens ?? 0,
-            cached: json.usage.prompt_tokens_details?.cached_tokens,
-          };
-        }
-        const choice = json.choices?.[0];
-        if (!choice) continue;
-        if (choice.finish_reason) finishReason = choice.finish_reason;
-
-        const delta = choice.delta ?? choice.message; // some providers send message on last chunk
-        if (!delta) continue;
-        // Provider-specific reasoning channels: surfaced to the UI, never
-        // stored in text (so never re-sent as history).
-        const reasoning = delta.reasoning_content ?? delta.reasoning;
-        if (typeof reasoning === "string" && reasoning.length > 0) {
-          onReasoning?.(reasoning);
-        }
-        if (typeof delta.content === "string" && delta.content.length > 0) {
-          const { out, think } = filter.push(delta.content);
-          if (think) onReasoning?.(think);
-          if (out) {
-            text += out;
-            onText(out);
-          }
-        }
-        if (Array.isArray(delta.tool_calls)) {
-          for (const tc of delta.tool_calls) {
-            const idx = tc.index ?? 0;
-            let partial = calls.get(idx);
-            if (!partial) {
-              partial = { id: "", name: "", args: "" };
-              calls.set(idx, partial);
-            }
-            if (tc.id) partial.id = tc.id;
-            if (tc.function?.name) partial.name += tc.function.name;
-            if (tc.function?.arguments) partial.args += tc.function.arguments;
-          }
-        }
       }
     }
+    buf += decoder.decode(); // flush any partial multi-byte character
+    if (buf.trim()) handleLine(buf); // final line without a trailing newline
   } finally {
     signal?.removeEventListener("abort", abort);
     reader.releaseLock?.();
+  }
+
+  // A 200 whose body carried no parsable SSE event is a failed request, not an
+  // empty answer. Returning success here wrote {"role":"assistant",content:null}
+  // into the session and exited 0, so nothing upstream ever noticed.
+  if (!sawEvent) {
+    throw new StreamEmptyError();
   }
 
   const tail = filter.flush();

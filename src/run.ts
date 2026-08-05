@@ -132,7 +132,9 @@ export async function runMain(flags: CliFlags) {
     }
     if (!json) process.stdout.write("\n");
     await lifecycleSettled();
-    process.exit(0);
+    // A cancelled run is not a successful run — CI and wrapper scripts read
+    // this exit code (130 = terminated by SIGINT, per shell convention).
+    process.exit(ctrl.signal.aborted ? 130 : 0);
   } catch (e) {
     if (!json) console.error(`\nfailed: ${(e as Error).message}`);
     else process.stdout.write(JSON.stringify({ type: "error", message: (e as Error).message, retryable: false }) + "\n");

@@ -225,11 +225,25 @@ class McpClient {
   async listTools(): Promise<any[]> {
     const tools: any[] = [];
     let cursor: string | undefined;
+    // A server that returns a cursor forever (repeated, or fresh-but-empty
+    // pages) used to spin here with no timeout and no exit — freezing the
+    // REPL before its first turn, ACP session/new, and `ap serve` before the
+    // port opened. Three independent bounds, all above the tool budget so a
+    // legitimately fine-grained paginator is never truncated.
+    const seen = new Set<string>();
+    let pages = 0;
     do {
       const r = await this.request("tools/list", cursor ? { cursor } : {}, LIST_TIMEOUT_MS);
-      tools.push(...(r?.tools ?? []));
-      cursor = r?.nextCursor;
-    } while (cursor && tools.length < MAX_TOOLS_PER_SERVER);
+      const batch = r?.tools ?? [];
+      tools.push(...batch);
+      const next = r?.nextCursor;
+      if (!next) break;
+      if (typeof next !== "string" || seen.has(next)) break; // repeated/invalid cursor
+      if (++pages > MAX_TOOLS_PER_SERVER + 50) break;        // runaway paginator
+      if (!batch.length && pages > 20) break;                // empty pages forever
+      seen.add(next);
+      cursor = next;
+    } while (tools.length < MAX_TOOLS_PER_SERVER);
     return tools;
   }
 

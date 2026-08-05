@@ -274,6 +274,9 @@ export async function runTurn(
     // tool results breaks the next request — patch in cancellation results.
     patchDanglingToolCalls(session);
     emit({ type: "done", sessionId: session.id, text: finalText });
+    // Abort is a terminal path too. onError (not onDone) — a cancel landing
+    // mid-stream already fires onError, and onDone means "the chat finished".
+    fireLifecycle(config, "onError", { sessionId: session.id, cwd: config.cwd, message: "aborted", reason: "aborted" });
     return finalText;
   }
 

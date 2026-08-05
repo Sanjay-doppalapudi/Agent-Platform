@@ -1,6 +1,6 @@
 // Fetch-based OpenAI-compatible streaming client. No SDK.
 import type { ResolvedProvider } from "./config.ts";
-import { consumeSSE, StreamStallError, type AssembledResponse, type ToolCall } from "./stream.ts";
+import { consumeSSE, StreamEmptyError, StreamStallError, type AssembledResponse, type ToolCall } from "./stream.ts";
 
 export type ContentPart = {
   type: "text";
@@ -116,6 +116,9 @@ export async function streamChat(
       return await consumeSSE(res.body, onText, signal, onReasoning, idleTimeoutMs);
     } catch (e) {
       if (signal?.aborted) throw new ProviderError("aborted", 0, false);
+      // Nothing was emitted, so retrying cannot duplicate output: retry HERE
+      // rather than surfacing a spurious empty turn.
+      if (e instanceof StreamEmptyError) { lastErr = new ProviderError(e.message, 0, true); continue; }
       if (e instanceof StreamStallError) throw new ProviderError(e.message, 0, true, true);
       throw new ProviderError(`stream failed: ${(e as Error).message}`, 0, true, true);
     }
