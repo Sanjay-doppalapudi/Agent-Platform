@@ -55,6 +55,8 @@ bun install && bun link
 
 Every install also needs [ripgrep](https://github.com/BurntSushi/ripgrep) on PATH (`winget install BurntSushi.ripgrep.MSVC` / `brew install ripgrep` / `apt install ripgrep`).
 
+Run **`ap doctor`** any time something misbehaves: it checks ripgrep, git, the shell, data-dir writability, the selected provider, whether an API key actually resolves, credential-file permissions, endpoint reachability, and MCP server health — printing a concrete fix for every failure (exit 1 when something is broken, so CI can gate on it). `ap doctor --offline` skips the network and MCP probes.
+
 **First run:**
 
 ```sh
@@ -75,6 +77,7 @@ ap serve [--port 4141]  # HTTP server mode (sessions + SSE)
 ap models [query]       # search the models.dev catalog (context + pricing)
 ap auth <provider>      # store an API key
 ap resume / ap sessions # pick a session to resume / list + full-text search
+ap doctor               # diagnose the environment (deps, keys, endpoint, MCP) — exit 1 if broken
 ap prompt [--cwd dir]   # print the system prompt used for a directory
 ap tool grep '{"pattern":"foo"}'   # run one tool directly (testing)
 ap help <command>       # detailed help (run · loop · skills · mcp · acp · serve · sessions)

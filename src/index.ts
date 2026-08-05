@@ -196,6 +196,7 @@ Usage:
   ap sessions [search q]   list sessions / full-text search them
   ap share [id]            export a transcript as one self-contained HTML file
   ap ps [tail|kill <pid>]  background processes started with bash background:true
+  ap doctor [--offline]    diagnose the environment (deps, keys, endpoint, MCP)
   ap prompt [--cwd dir]    print the exact system prompt for a directory
   ap tool <name> '<json>'  run one tool directly, no LLM (testing)
   ap help <command>        detailed help: ${Object.keys(HELP_TOPICS).join(" · ")}
@@ -406,6 +407,30 @@ Example:  ap mcp add fs bun x @modelcontextprotocol/server-filesystem .`);
     console.error(`usage: ap mcp [list] | ap mcp call <server> <tool> '<json>' | ap mcp add <name> <command...> [--url u] [--project] | ap mcp remove <name>`);
     process.exit(1);
     break;
+  }
+  case "doctor": {
+    const { loadConfig } = await import("./config.ts");
+    const { runChecks, overallState } = await import("./doctor.ts");
+    const { currentTheme, paint, setTheme } = await import("./theme.ts");
+    const config = loadConfig(flags);
+    if (config.theme) setTheme(config.theme);
+    const t = currentTheme();
+    const noNet = rest.includes("--offline");
+    console.log(`AP ${VERSION} · ${process.platform} · Bun ${Bun.version}\n`);
+    const checks = await runChecks(config, { net: !noNet, mcp: !noNet });
+    for (const c of checks) {
+      const mark = c.state === "ok" ? paint(t.success, "✓") : c.state === "warn" ? paint(t.warn, "!") : paint(t.error, "✗");
+      console.log(`${mark} ${c.name.padEnd(12)} ${c.detail}`);
+      if (c.fix) console.log(`  ${paint(t.dim, `→ ${c.fix}`)}`);
+    }
+    const state = overallState(checks);
+    const bad = checks.filter((c) => c.state !== "ok").length;
+    console.log(
+      state === "ok"
+        ? `\n${paint(t.success, "all checks passed")} — you're ready: run "ap" in a project directory`
+        : `\n${bad} check${bad === 1 ? "" : "s"} need attention (see → lines above)`,
+    );
+    process.exit(state === "fail" ? 1 : 0);
   }
   case "ps": {
     const { loadConfig } = await import("./config.ts");
