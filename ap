@@ -1,0 +1,8 @@
+#!/usr/bin/env sh
+# "ap" shim for POSIX shells (macOS, Linux, WSL, Git Bash) - runs AP from
+# source via bun, mirroring ap.cmd. Windows cmd/PowerShell never pick this
+# file up (PATHEXT only resolves extensions), so the two shims can't clash:
+# each OS finds exactly one. Note Smart App Control is a Windows-only
+# concern - on macOS/Linux a locally compiled binary runs fine, so there
+# this shim is just a dev convenience for running from source.
+exec bun "$(dirname "$0")/src/index.ts" "$@"

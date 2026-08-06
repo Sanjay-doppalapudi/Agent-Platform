@@ -1,0 +1,5 @@
+# The two "ap" shims are line-ending load-bearing: the POSIX one breaks if
+# its shebang gains a \r ("env: sh\r: not found"), and cmd mis-parses ap.cmd
+# without CRLF. Pin both so autocrlf can never flip them on checkout.
+ap text eol=lf
+ap.cmd text eol=crlf
