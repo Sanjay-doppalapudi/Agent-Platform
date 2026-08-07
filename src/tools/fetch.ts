@@ -1,10 +1,6 @@
 // fetch tool: URL → readable text (crude HTML strip), capped. Zero deps.
-// render:true runs the page through the SYSTEM's Chrome/Edge in headless mode
-// (--dump-dom, one short-lived process) so JS-rendered pages return content;
-// nothing is bundled and it degrades to plain fetch when no browser exists.
-import { existsSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+// `render:true` is deliberately unavailable: an external browser cannot
+// enforce AP's hostname policy across DNS, socket connections, and redirects.
 import { isIP } from "node:net";
 import { anySignal, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
@@ -32,7 +28,9 @@ function htmlToText(html: string): string {
  * documentation URLs for a coding task.
  */
 export function isBlockedFetchHost(host: string): string | null {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, "");
+  const unbracketed = host.toLowerCase().replace(/^\[|\]$/g, "");
+  // A trailing DNS root dot is semantically equivalent to the bare hostname.
+  const h = unbracketed.endsWith(".") ? unbracketed.slice(0, -1) : unbracketed;
   if (h === "metadata.google.internal" || h.endsWith(".metadata.google.internal")) {
     return "cloud metadata host";
   }
@@ -46,7 +44,10 @@ export function isBlockedFetchHost(host: string): string | null {
   } else if (ipVersion === 6) {
     // fd00:ec2::254 (AWS IMDS), fe80::/10 link-local, ::ffff:169.254.x.x
     if (bare === "fd00:ec2::254" || bare.startsWith("fd00:ec2:")) return "cloud metadata address";
-    if (bare.startsWith("fe80:")) return "link-local address";
+    const firstHextet = Number.parseInt(bare.split(":", 1)[0] ?? "", 16);
+    if (Number.isFinite(firstHextet) && (firstHextet & 0xffc0) === 0xfe80) {
+      return "link-local address";
+    }
     const v4mapped = bare.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
     if (v4mapped) return isBlockedFetchHost(v4mapped[1]!);
   }
@@ -64,81 +65,6 @@ export function assertFetchUrlAllowed(raw: string): URL {
   return u;
 }
 
-// Located once per process; null = probed and absent.
-let browserExe: string | null | undefined;
-
-/** Find an installed Chromium-family browser — never download one. */
-function findBrowser(): string | null {
-  if (browserExe !== undefined) return browserExe;
-  const candidates: string[] = [];
-  if (process.platform === "win32") {
-    const env = process.env;
-    for (const base of [env["ProgramFiles"], env["ProgramFiles(x86)"], env["LOCALAPPDATA"]]) {
-      if (!base) continue;
-      candidates.push(
-        join(base, "Google", "Chrome", "Application", "chrome.exe"),
-        join(base, "Microsoft", "Edge", "Application", "msedge.exe"),
-        join(base, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
-      );
-    }
-  } else if (process.platform === "darwin") {
-    candidates.push(
-      "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-      "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-      "/Applications/Chromium.app/Contents/MacOS/Chromium",
-      "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-    );
-  }
-  browserExe = candidates.find((c) => existsSync(c)) ?? null;
-  if (!browserExe) {
-    for (const name of ["google-chrome", "google-chrome-stable", "chromium", "chromium-browser", "microsoft-edge", "brave"]) {
-      const found = Bun.which(name);
-      if (found) { browserExe = found; break; }
-    }
-  }
-  return browserExe;
-}
-
-/** Rendered DOM via `chrome --headless --dump-dom`, or null if unavailable. */
-async function renderWithBrowser(url: string, signal: AbortSignal): Promise<string | null> {
-  const exe = findBrowser();
-  if (!exe) return null;
-  const proc = Bun.spawn(
-    [
-      exe,
-      "--headless=new",
-      "--disable-gpu",
-      "--no-first-run",
-      "--no-default-browser-check",
-      "--hide-scrollbars",
-      "--mute-audio",
-      // Unique per spawn: a shared profile dir is locked by the first Chrome,
-      // so concurrent render:true calls in one turn silently failed and were
-      // reported as "no browser found". Keep SOME profile dir, though —
-      // without one Chrome would attach to the user's real profile.
-      `--user-data-dir=${join(tmpdir(), ".ap", `hl-${process.pid}-${Math.random().toString(36).slice(2, 10)}`)}`,
-      "--virtual-time-budget=6000", // let JS/fetches settle (virtual clock)
-      "--timeout=15000",
-      "--dump-dom",
-      url,
-    ],
-    { stdout: "pipe", stderr: "ignore", stdin: "ignore" },
-  );
-  const timer = setTimeout(() => proc.kill(), 25_000); // hard backstop
-  const onAbort = () => proc.kill();
-  signal.addEventListener("abort", onAbort, { once: true });
-  try {
-    const html = await new Response(proc.stdout).text();
-    await proc.exited;
-    return html.trim().length > 0 ? html : null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-    signal.removeEventListener("abort", onAbort);
-  }
-}
-
 export async function fetchTool(
   args: { url: string; render?: boolean },
   ctx: ToolCtx,
@@ -148,15 +74,9 @@ export async function fetchTool(
   }
   const url = assertFetchUrlAllowed(args.url).href;
   if (args.render) {
-    const html = await renderWithBrowser(url, ctx.signal);
-    if (html !== null) {
-      return truncateMiddle(htmlToText(html), MAX_BYTES) || "(page rendered empty)";
-    }
-    // A cancelled render also returns null. Falling through would fire a
-    // brand-new 15s request for a URL the user just cancelled — and blame a
-    // missing browser for it.
-    if (ctx.signal.aborted) throw new ToolError("fetch cancelled");
-    ctx.warn?.("render requested but no Chrome/Edge found — falling back to plain fetch");
+    throw new ToolError(
+      "fetch render:true is temporarily disabled: the system browser cannot enforce the hostname policy across redirects and socket connections. Use plain fetch or a sandboxed browser.",
+    );
   }
   let res: Response;
   try {

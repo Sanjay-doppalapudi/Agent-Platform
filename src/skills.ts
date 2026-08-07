@@ -54,7 +54,7 @@ const skillCache = new Map<string, SkillInfo[]>();
 
 /** All available skills: project .ap/skills > .claude/skills > <dataDir>/skills > ~/.claude/skills. */
 export function discoverSkills(config: Config): SkillInfo[] {
-  const key = `${config.dataDir}|${config.cwd}`;
+  const key = JSON.stringify([config.dataDir, config.cwd]);
   const hit = skillCache.get(key);
   if (hit) return hit;
   const found = new Map<string, SkillInfo>();
@@ -150,39 +150,42 @@ export async function installSkill(
   pick: { name: string; dir: string },
   log: (line: string) => void,
 ): Promise<string> {
-  const tree = await ghJson(`https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`);
-  const entries: TreeEntry[] = tree.tree ?? [];
-  const prefix = pick.dir === "" ? "" : pick.dir + "/";
-  const files = entries.filter(
-    (e) => e.type === "blob" && (prefix === "" ? !e.path.includes("/") : e.path.startsWith(prefix)),
-  );
-  if (files.length > MAX_FILES_PER_SKILL) {
-    throw new Error(`skill "${pick.name}" has ${files.length} files (cap ${MAX_FILES_PER_SKILL}) — install manually`);
-  }
-  if (!safeSkillPath(pick.name)) throw new Error(`unsafe skill name from repo: ${pick.name}`);
-  const destRoot = join(dataDir, "skills", pick.name);
-  for (const f of files) {
-    if ((f.size ?? 0) > MAX_FILE_BYTES) { log(`  skip ${f.path} (too large)`); continue; }
-    const rel = prefix === "" ? f.path : f.path.slice(prefix.length);
-    if (!safeSkillPath(rel)) { log(`  skip ${f.path} (unsafe path)`); continue; }
-    const raw = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${f.path}`, {
-      headers: { "user-agent": "ap-agent/1.0" },
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!raw.ok) throw new Error(`download failed (${raw.status}): ${f.path}`);
-    const dest = join(destRoot, rel);
-    // Belt and braces: even if the validator ever misses a form, never write
-    // outside the skill's own directory.
-    if (!resolve(dest).startsWith(resolve(destRoot) + sep)) {
-      log(`  skip ${f.path} (escapes the skill directory)`);
-      continue;
+  try {
+    const tree = await ghJson(`https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`);
+    const entries: TreeEntry[] = tree.tree ?? [];
+    const prefix = pick.dir === "" ? "" : pick.dir + "/";
+    const files = entries.filter(
+      (e) => e.type === "blob" && (prefix === "" ? !e.path.includes("/") : e.path.startsWith(prefix)),
+    );
+    if (files.length > MAX_FILES_PER_SKILL) {
+      throw new Error(`skill "${pick.name}" has ${files.length} files (cap ${MAX_FILES_PER_SKILL}) — install manually`);
     }
-    mkdirSync(dirname(dest), { recursive: true });
-    writeFileSync(dest, Buffer.from(await raw.arrayBuffer()));
-    log(`  + ${rel}`);
+    if (!safeSkillPath(pick.name)) throw new Error(`unsafe skill name from repo: ${pick.name}`);
+    const destRoot = join(dataDir, "skills", pick.name);
+    for (const f of files) {
+      if ((f.size ?? 0) > MAX_FILE_BYTES) { log(`  skip ${f.path} (too large)`); continue; }
+      const rel = prefix === "" ? f.path : f.path.slice(prefix.length);
+      if (!safeSkillPath(rel)) { log(`  skip ${f.path} (unsafe path)`); continue; }
+      const raw = await fetch(`https://raw.githubusercontent.com/${owner}/${repo}/HEAD/${f.path}`, {
+        headers: { "user-agent": "ap-agent/1.0" },
+        signal: AbortSignal.timeout(30_000),
+      });
+      if (!raw.ok) throw new Error(`download failed (${raw.status}): ${f.path}`);
+      const dest = join(destRoot, rel);
+      // Belt and braces: even if the validator ever misses a form, never write
+      // outside the skill's own directory.
+      if (!resolve(dest).startsWith(resolve(destRoot) + sep)) {
+        log(`  skip ${f.path} (escapes the skill directory)`);
+        continue;
+      }
+      mkdirSync(dirname(dest), { recursive: true });
+      writeFileSync(dest, Buffer.from(await raw.arrayBuffer()));
+      log(`  + ${rel}`);
+    }
+    return destRoot;
+  } finally {
+    clearSkillCache();
   }
-  clearSkillCache();
-  return destRoot;
 }
 
 export function removeSkill(dataDir: string, name: string): boolean {
@@ -193,7 +196,10 @@ export function removeSkill(dataDir: string, name: string): boolean {
   const dir = resolve(root, name);
   if (!dir.startsWith(root + sep) && dir !== root) return false;
   if (!existsSync(join(dir, "SKILL.md"))) return false;
-  rmSync(dir, { recursive: true, force: true });
-  clearSkillCache();
-  return true;
+  try {
+    rmSync(dir, { recursive: true, force: true });
+    return true;
+  } finally {
+    clearSkillCache();
+  }
 }

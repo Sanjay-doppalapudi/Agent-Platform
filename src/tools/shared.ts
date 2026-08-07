@@ -106,7 +106,7 @@ export function canonicalPath(target: string): string {
     // Walk up until an ancestor exists (or we hit the root).
     let rest = basename(target);
     let dir = dirname(target);
-    for (let i = 0; i < 64; i++) {
+    for (;;) {
       try {
         return join(realpathSync(dir), rest);
       } catch {

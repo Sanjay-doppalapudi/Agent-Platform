@@ -14,7 +14,7 @@ import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { isInsideRoots, isPrivatePath, isRestrictedDataDirPath, readRoots, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
+import { canonicalPath, isInsideRoots, isPrivatePath, isRestrictedDataDirPath, readRoots, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 import { relative, isAbsolute } from "node:path";
 
@@ -60,7 +60,7 @@ export function scanDangerous(cmd: string): string | null {
 // Windows drive letters use a lookbehind so `http://…` does NOT match as
 // drive `P:` (the prior `p:/` false positive made URL commands look like
 // in-workspace relative paths and skipped the outside-path gate).
-const PATH_TOKEN_RE = /(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\/(?:[a-z])\/|\/(?:home|Users|etc|var|root|dev|proc|sys|boot|opt|usr)\/|~[\\/]|\$HOME\b|%USERPROFILE%|\$env:USERPROFILE)[^\s"'`;|&<>()*]*/g;
+const PATH_TOKEN_RE = /(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\/(?:[a-z])\/|\/(?:tmp|home|Users|etc|var|root|dev|proc|sys|boot|opt|usr)\/|~[\\/]|\$HOME\b|%USERPROFILE%|\$env:USERPROFILE)[^\s"'`;|&<>()*]*/g;
 
 /** Paths a command references outside the readable roots. {priv} = AP-private. */
 export function scanCmdPaths(
@@ -73,8 +73,11 @@ export function scanCmdPaths(
   for (const m of cmd.match(PATH_TOKEN_RE) ?? []) {
     let p = m.replace(/^~(?=[\\/])/, homedir()).replace(/^(\$HOME|%USERPROFILE%|\$env:USERPROFILE)/, homedir());
     p = resolvePath(p.replace(/[.,:]+$/, ""), ctx.cwd);
+    const canonical = canonicalPath(p);
     if (isPrivatePath(p, ctx.config) || isRestrictedDataDirPath(p, ctx.config)) priv.add(p);
-    else if (!isInsideRoots(p, roots)) outside.add(p);
+    if (isPrivatePath(canonical, ctx.config) || isRestrictedDataDirPath(canonical, ctx.config)) priv.add(canonical);
+    if (!isInsideRoots(p, roots)) outside.add(p);
+    if (!isInsideRoots(canonical, roots)) outside.add(canonical);
   }
   // Relative escapes: ../ chains or a bare `cd ..` step out of the workspace.
   if (/(?:^|[\s"'=(])\.\.[\\/]|\bcd\s+\.\.(?![\w.])/.test(cmd)) outside.add("(relative path escaping the workspace via ..)");

@@ -1,69 +1,64 @@
-// ap serve: loopback default, bearer auth, health does not leak provider.
+// ap serve: production routes bind loopback by default, require a bearer
+// token when configured, and keep provider/model out of the public health body.
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { serveMain } from "../src/server.ts";
 
-/** Minimal stand-in that reuses the same auth helpers as server.ts would —
- *  we exercise the live server via spawning `ap serve` would need a provider
- *  key, so this unit-tests the auth predicate shape by importing nothing
- *  heavy: instead we spin a tiny Bun.serve with the same rules. */
-function startTestServe(opts: { host: string; token: string }) {
-  const hostname = opts.host;
-  const token = opts.token;
-  const authorized = (req: Request): boolean => {
-    if (!token) return true;
-    const h = req.headers.get("authorization") ?? "";
-    if (h === `Bearer ${token}`) return true;
-    try { return new URL(req.url).searchParams.get("token") === token; } catch { return false; }
-  };
-  return Bun.serve({
+async function startTestServe(token = "sekret") {
+  const cwd = mkdtempSync(join(tmpdir(), "ap-serve-auth-"));
+  const dataDir = join(cwd, "data");
+  mkdirSync(dataDir);
+  // Keep server state isolated, disable any user-level MCP configuration, and
+  // inject a local ad-hoc provider that is never contacted in these route tests.
+  writeFileSync(join(cwd, "ap.config.json"), JSON.stringify({ dataDir, mcpServers: {} }));
+  const server = await serveMain({
+    cwd,
+    baseUrl: "http://127.0.0.1:9/v1",
+    apiKey: "test-key",
+    model: "test-model",
     port: 0,
-    hostname,
-    fetch(req) {
-      const path = new URL(req.url).pathname;
-      if (path === "/health") {
-        return Response.json({ ok: true, version: "test", auth: token ? "required" : "off", host: hostname });
-      }
-      if (!authorized(req)) return Response.json({ error: "unauthorized" }, { status: 401 });
-      return Response.json({ ok: true, secret: "session-data" });
-    },
+    host: "127.0.0.1",
+    token,
   });
+  return { server, url: `http://127.0.0.1:${server.port}` };
 }
 
 describe("serve auth model", () => {
   test("health is public but does not advertise provider/model", async () => {
-    const srv = startTestServe({ host: "127.0.0.1", token: "sekret" });
+    const srv = await startTestServe();
     try {
-      const r = await fetch(`http://127.0.0.1:${srv.port}/health`);
+      const r = await fetch(`${srv.url}/health`);
       const body = await r.json() as any;
       expect(r.status).toBe(200);
       expect(body.ok).toBe(true);
       expect(body.provider).toBeUndefined();
       expect(body.model).toBeUndefined();
       expect(body.auth).toBe("required");
-    } finally { srv.stop(true); }
+    } finally { srv.server.stop(true); }
   });
 
   test("session routes require the bearer token", async () => {
-    const srv = startTestServe({ host: "127.0.0.1", token: "sekret" });
+    const srv = await startTestServe();
     try {
-      const denied = await fetch(`http://127.0.0.1:${srv.port}/session`);
+      const denied = await fetch(`${srv.url}/session`, { method: "POST" });
       expect(denied.status).toBe(401);
-      const ok = await fetch(`http://127.0.0.1:${srv.port}/session`, {
-        headers: { authorization: "Bearer sekret" },
+      const ok = await fetch(`${srv.url}/session`, {
+        method: "POST",
+        headers: { authorization: "Bearer sekret", "content-type": "application/json" },
       });
       expect(ok.status).toBe(200);
-      expect((await ok.json() as any).secret).toBe("session-data");
-    } finally { srv.stop(true); }
+      expect((await ok.json() as any).id).toBeString();
+    } finally { srv.server.stop(true); }
   });
 
   test("?token= works for SSE-style clients", async () => {
-    const srv = startTestServe({ host: "127.0.0.1", token: "sekret" });
+    const srv = await startTestServe();
     try {
-      const r = await fetch(`http://127.0.0.1:${srv.port}/session?token=sekret`);
+      const r = await fetch(`${srv.url}/session?token=sekret`, { method: "POST" });
       expect(r.status).toBe(200);
-    } finally { srv.stop(true); }
+    } finally { srv.server.stop(true); }
   });
 });
 

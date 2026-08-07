@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { loadConfig } from "../src/config.ts";
 import { execTool } from "../src/tools/index.ts";
 import { scanCmdPaths, scanDangerous } from "../src/tools/bash.ts";
-import { assertFetchUrlAllowed, isBlockedFetchHost } from "../src/tools/fetch.ts";
+import { assertFetchUrlAllowed, fetchTool, isBlockedFetchHost } from "../src/tools/fetch.ts";
 import { canonicalPath, isInsideRoots, isRestrictedDataDirPath, redactGrepLine, sandboxRoots } from "../src/tools/shared.ts";
 
 const SECRET = "sk-or-GREP-LEAK-9999";
@@ -69,13 +69,20 @@ describe("fetch blocks cloud metadata", () => {
   test("link-local and metadata hosts", () => {
     expect(isBlockedFetchHost("169.254.169.254")).toBeTruthy();
     expect(isBlockedFetchHost("metadata.google.internal")).toBeTruthy();
+    expect(isBlockedFetchHost("metadata.google.internal.")).toBeTruthy();
     expect(isBlockedFetchHost("fd00:ec2::254")).toBeTruthy();
+    expect(isBlockedFetchHost("fe81::1")).toBeTruthy();
     expect(isBlockedFetchHost("example.com")).toBeNull();
     expect(isBlockedFetchHost("127.0.0.1")).toBeNull(); // local docs still ok
   });
   test("assertFetchUrlAllowed rejects metadata URLs", () => {
     expect(() => assertFetchUrlAllowed("http://169.254.169.254/latest/meta-data/")).toThrow(/blocked/);
     expect(() => assertFetchUrlAllowed("https://example.com/docs")).not.toThrow();
+  });
+
+  test("rendering is disabled until it can enforce the network policy", async () => {
+    const w = workspace();
+    await expect(fetchTool({ url: "https://example.com", render: true }, ctxFor(w))).rejects.toThrow(/disabled/);
   });
 });
 
@@ -107,6 +114,26 @@ describe("symlink targets are contained", () => {
     expect(r.error).toBe(true);
     expect(r.output).not.toContain(SECRET);
     expect(canonicalPath(link)).toContain("credentials.json");
+  });
+
+  test.if(process.platform !== "win32")("bash denies an absolute workspace symlink to protected data", async () => {
+    const w = workspace();
+    const link = join(w.cwd, "bash-leak-creds");
+    symlinkSync(join(w.dataDir, "credentials.json"), link);
+    const r = await execTool("bash", JSON.stringify({ cmd: `cat ${link}` }), ctxFor(w, async () => true));
+    expect(r.error).toBe(true);
+    expect(r.output).not.toContain(SECRET);
+  });
+
+  test.if(process.platform !== "win32")("writes through a symlink after 64 missing children still need a permit", async () => {
+    const w = workspace();
+    const outside = mkdtempSync(join(tmpdir(), "ap-outside-"));
+    const link = join(w.cwd, "deep-link");
+    symlinkSync(outside, link);
+    const target = join(link, ...Array.from({ length: 70 }, (_, i) => `missing-${i}`), "file.txt");
+    const r = await execTool("write", JSON.stringify({ path: target, content: "nope" }), ctxFor(w, async () => false));
+    expect(r.error).toBe(true);
+    expect(r.output.toLowerCase()).toContain("denied");
   });
 });
 

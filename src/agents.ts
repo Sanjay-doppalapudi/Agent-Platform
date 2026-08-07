@@ -71,7 +71,7 @@ const agentCache = new Map<string, AgentDef[]>();
 
 /** All defined agents: .ap/agents > .claude/agents > <dataDir>/agents. */
 export function discoverAgents(config: Config): AgentDef[] {
-  const key = `${config.dataDir}|${config.cwd}`;
+  const key = JSON.stringify([config.dataDir, config.cwd]);
   const hit = agentCache.get(key);
   if (hit) return hit;
   const found = new Map<string, AgentDef>();

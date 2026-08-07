@@ -253,4 +253,5 @@ export async function serveMain(flags: CliFlags) {
     ? ` · auth required (Authorization: Bearer …)`
     : ` · auth off (loopback only)`;
   console.log(`AP serving on http://${hostname === "0.0.0.0" ? "127.0.0.1" : hostname}:${server.port}${authNote} · ${primary.name}/${primary.model}`);
+  return server;
 }

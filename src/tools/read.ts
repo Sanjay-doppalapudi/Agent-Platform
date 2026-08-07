@@ -23,13 +23,13 @@ export async function readTool(
   }
 
   let content = new TextDecoder().decode(bytes);
-  if (ctx.config.redactEnv && (isEnvFile(path) || isSecretFile(path))) {
-    if (isEnvFile(path) || /\.(json|yml|yaml)$/i.test(path)) {
-      content = redactEnvContent(content);
-    } else {
-      // PEM / raw key material — never show body contents.
-      return `secret file (${bytes.length} bytes): ${path} — contents redacted`;
-    }
+  if (ctx.config.redactEnv && isEnvFile(path)) {
+    content = redactEnvContent(content);
+  } else if (ctx.config.redactEnv && isSecretFile(path)) {
+    // JSON/YAML manifests and raw key material use different syntaxes. Do not
+    // pretend the .env redactor covers them — suppress their body until a
+    // format-aware redactor exists.
+    return `secret file (${bytes.length} bytes): ${path} — contents redacted`;
   }
 
   const lines = content.split("\n");

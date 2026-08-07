@@ -5,9 +5,9 @@ import { describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverAgents, getAgent } from "../src/agents.ts";
+import { clearAgentCache, discoverAgents, getAgent } from "../src/agents.ts";
 import { loadConfig } from "../src/config.ts";
-import { discoverSkills, safeSkillPath } from "../src/skills.ts";
+import { clearSkillCache, discoverSkills, safeSkillPath } from "../src/skills.ts";
 
 describe("skills installer path validation", () => {
   // A GitHub tree path is always '/'-separated, so a backslash is data — but
@@ -79,6 +79,28 @@ describe("BOM must not void frontmatter", () => {
       "\uFEFF---\nname: hidden\ninternal: true\n---\nBody.\n",
     );
     expect(discoverSkills(loadConfig({ cwd } as any)).map((s) => s.name)).not.toContain("hidden");
+  });
+});
+
+describe("discovery cache keys", () => {
+  test("paths containing the former delimiter cannot collide", () => {
+    const root = mkdtempSync(join(tmpdir(), "ap-cache-key-"));
+    const firstData = `${root}/data|${root}/middle`;
+    const firstCwd = `${root}/tail`;
+    const secondData = `${root}/data`;
+    const secondCwd = `${root}/middle|${root}/tail`;
+    // `${dataDir}|${cwd}` collides for this pair; JSON tuple encoding does not.
+    mkdirSync(join(firstData, "agents"), { recursive: true });
+    mkdirSync(join(firstData, "skills", "first"), { recursive: true });
+    writeFileSync(join(firstData, "agents", "first.md"), "First agent\n");
+    writeFileSync(join(firstData, "skills", "first", "SKILL.md"), "---\nname: first\n---\n");
+    clearAgentCache();
+    clearSkillCache();
+
+    expect(discoverAgents({ dataDir: firstData, cwd: firstCwd } as any).map((a) => a.name)).toEqual(["first"]);
+    expect(discoverAgents({ dataDir: secondData, cwd: secondCwd } as any)).toEqual([]);
+    expect(discoverSkills({ dataDir: firstData, cwd: firstCwd } as any).map((s) => s.name)).toEqual(["first"]);
+    expect(discoverSkills({ dataDir: secondData, cwd: secondCwd } as any)).toEqual([]);
   });
 });
 
