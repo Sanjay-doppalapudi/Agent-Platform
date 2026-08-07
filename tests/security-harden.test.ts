@@ -84,6 +84,36 @@ describe("fetch blocks cloud metadata", () => {
     const w = workspace();
     await expect(fetchTool({ url: "https://example.com", render: true }, ctxFor(w))).rejects.toThrow(/disabled/);
   });
+
+  test("rejects a blocked redirect before connecting to its target", async () => {
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => Response.redirect("http://169.254.169.254/latest/meta-data/", 302),
+    });
+    try {
+      const w = workspace();
+      await expect(fetchTool({ url: `http://127.0.0.1:${server.port}/redirect` }, ctxFor(w)))
+        .rejects.toThrow(/fetch blocked/);
+    } finally {
+      server.stop(true);
+    }
+  });
+
+  test("fetches a vetted address through the pinned connection", async () => {
+    const server = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch: () => new Response("local response"),
+    });
+    try {
+      const w = workspace();
+      await expect(fetchTool({ url: `http://127.0.0.1:${server.port}/` }, ctxFor(w)))
+        .resolves.toBe("local response");
+    } finally {
+      server.stop(true);
+    }
+  });
 });
 
 describe("path tokens do not treat http:// as a Windows drive", () => {
@@ -91,6 +121,12 @@ describe("path tokens do not treat http:// as a Windows drive", () => {
     const w = workspace();
     const r = scanCmdPaths("curl https://example.com/a -o out.html", ctxFor(w));
     expect(r.outside).toEqual([]);
+  });
+
+  test("ordinary absolute Unix paths are scanned", () => {
+    const w = workspace();
+    const r = scanCmdPaths("cat /workspace/leak", ctxFor(w));
+    expect(r.outside).toContain("/workspace/leak");
   });
 });
 

@@ -60,7 +60,8 @@ export function scanDangerous(cmd: string): string | null {
 // Windows drive letters use a lookbehind so `http://…` does NOT match as
 // drive `P:` (the prior `p:/` false positive made URL commands look like
 // in-workspace relative paths and skipped the outside-path gate).
-const PATH_TOKEN_RE = /(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\/(?:[a-z])\/|\/(?:tmp|home|Users|etc|var|root|dev|proc|sys|boot|opt|usr)\/|~[\\/]|\$HOME\b|%USERPROFILE%|\$env:USERPROFILE)[^\s"'`;|&<>()*]*/g;
+const PATH_TOKEN_RE = /(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\/|~[\\/]|\$HOME\b|%USERPROFILE%|\$env:USERPROFILE)[^\s"'`;|&<>()*]*/g;
+const URL_TOKEN_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`;|&<>()*]+/gi;
 
 /** Paths a command references outside the readable roots. {priv} = AP-private. */
 export function scanCmdPaths(
@@ -70,7 +71,10 @@ export function scanCmdPaths(
   const roots = readRoots(ctx.config);
   const outside = new Set<string>();
   const priv = new Set<string>();
-  for (const m of cmd.match(PATH_TOKEN_RE) ?? []) {
+  // Strip URLs before matching generic Unix absolute paths: otherwise the
+  // `/path` suffix in `https://example.com/path` looks like a local file.
+  const pathsOnly = cmd.replace(URL_TOKEN_RE, "");
+  for (const m of pathsOnly.match(PATH_TOKEN_RE) ?? []) {
     let p = m.replace(/^~(?=[\\/])/, homedir()).replace(/^(\$HOME|%USERPROFILE%|\$env:USERPROFILE)/, homedir());
     p = resolvePath(p.replace(/[.,:]+$/, ""), ctx.cwd);
     const canonical = canonicalPath(p);
@@ -88,7 +92,7 @@ export function scanCmdPaths(
   if (relData && !relData.startsWith("..") && !isAbsolute(relData)) {
     const esc = relData.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const re = new RegExp(`${esc}/(?!memory(?:/|$)|artifacts(?:/|$))[^\\s"'\\\`;|&<>]*`, "i");
-    const hit = cmd.replace(/\\/g, "/").match(re);
+    const hit = pathsOnly.replace(/\\/g, "/").match(re);
     if (hit) priv.add(resolvePath(hit[0]!, ctx.cwd));
   }
   return { outside: [...outside].slice(0, 5), priv: [...priv].slice(0, 5) };

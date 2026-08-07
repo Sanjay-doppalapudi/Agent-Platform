@@ -1,11 +1,20 @@
 // fetch tool: URL → readable text (crude HTML strip), capped. Zero deps.
 // `render:true` is deliberately unavailable: an external browser cannot
 // enforce AP's hostname policy across DNS, socket connections, and redirects.
+import { lookup } from "node:dns/promises";
+import { request as httpRequest, type IncomingMessage } from "node:http";
+import { request as httpsRequest } from "node:https";
 import { isIP } from "node:net";
+import { Readable } from "node:stream";
 import { anySignal, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 const MAX_BYTES = 50_000;
+const MAX_REDIRECTS = 10;
+const FETCH_HEADERS = {
+  "user-agent": "ap-agent/1.0",
+  accept: "text/html,text/plain,application/json;q=0.9,*/*;q=0.5",
+};
 
 function htmlToText(html: string): string {
   return html
@@ -65,6 +74,71 @@ export function assertFetchUrlAllowed(raw: string): URL {
   return u;
 }
 
+/** Resolve once, validate the address, then pin the HTTP connection to it. */
+async function resolveAllowedAddress(hostname: string): Promise<{ address: string; family: number }> {
+  const host = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  const family = isIP(host);
+  const addresses = family
+    ? [{ address: host, family }]
+    : await lookup(host, { all: true, verbatim: true });
+  const allowed = addresses.find(({ address }) => !isBlockedFetchHost(address));
+  if (!allowed) {
+    const address = addresses[0]?.address ?? hostname;
+    throw new ToolError(`fetch blocked: ${isBlockedFetchHost(address) ?? "unsafe resolved address"} (${address})`);
+  }
+  return allowed;
+}
+
+function responseFromIncoming(incoming: IncomingMessage): Response {
+  const headers = new Headers();
+  for (const [name, value] of Object.entries(incoming.headers)) {
+    if (Array.isArray(value)) for (const item of value) headers.append(name, item);
+    else if (value !== undefined) headers.set(name, value);
+  }
+  return new Response(Readable.toWeb(incoming) as ReadableStream<Uint8Array>, {
+    status: incoming.statusCode ?? 500,
+    headers,
+  });
+}
+
+async function requestOnce(url: URL, signal: AbortSignal): Promise<{ incoming: IncomingMessage; response: Response }> {
+  const { address, family } = await resolveAllowedAddress(url.hostname);
+  if (signal.aborted) throw signal.reason ?? new Error("fetch cancelled");
+  return new Promise((resolve, reject) => {
+    const request = (url.protocol === "https:" ? httpsRequest : httpRequest) as typeof httpRequest;
+    const req = request(url, {
+      headers: FETCH_HEADERS,
+      signal,
+      // Pin the already-vetted DNS result. Without this callback, a hostname
+      // can rebind between validation and connect.
+      lookup: (
+        _host: string,
+        _opts: unknown,
+        done: (error: Error | null, address: string, family: number) => void,
+      ) => done(null, address, family),
+    } as any, (incoming) => resolve({ incoming, response: responseFromIncoming(incoming) }));
+    req.once("error", reject);
+    req.end();
+  });
+}
+
+/** Follow redirects manually so every target is validated before connecting. */
+async function safeFetch(raw: string, signal: AbortSignal): Promise<Response> {
+  let url = assertFetchUrlAllowed(raw);
+  for (let redirects = 0; redirects <= MAX_REDIRECTS; redirects++) {
+    const { incoming, response } = await requestOnce(url, signal);
+    const status = incoming.statusCode ?? 0;
+    const location = incoming.headers.location;
+    if (location && [301, 302, 303, 307, 308].includes(status)) {
+      incoming.resume(); // discard this redirect body before the next request
+      url = assertFetchUrlAllowed(new URL(location, url).href);
+      continue;
+    }
+    return response;
+  }
+  throw new ToolError(`fetch failed: too many redirects (max ${MAX_REDIRECTS})`);
+}
+
 export async function fetchTool(
   args: { url: string; render?: boolean },
   ctx: ToolCtx,
@@ -80,20 +154,9 @@ export async function fetchTool(
   }
   let res: Response;
   try {
-    res = await fetch(url, {
-      signal: anySignal(ctx.signal, AbortSignal.timeout(15_000)),
-      headers: { "user-agent": "ap-agent/1.0", accept: "text/html,text/plain,application/json;q=0.9,*/*;q=0.5" },
-      redirect: "follow",
-    });
+    res = await safeFetch(url, anySignal(ctx.signal, AbortSignal.timeout(15_000)));
   } catch (e) {
-    throw new ToolError(`fetch failed: ${(e as Error).message}`);
-  }
-  // Re-check the final URL — a redirect onto the metadata endpoint must not
-  // slip through after the initial allow.
-  try {
-    assertFetchUrlAllowed(res.url || url);
-  } catch (e) {
-    throw e instanceof ToolError ? e : new ToolError(`fetch blocked after redirect`);
+    throw e instanceof ToolError ? e : new ToolError(`fetch failed: ${(e as Error).message}`);
   }
   if (!res.ok) throw new ToolError(`fetch failed: HTTP ${res.status} for ${url}`);
   const type = res.headers.get("content-type") ?? "";

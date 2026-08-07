@@ -26,7 +26,7 @@ remain reachable for local docs).
 | Hooks | Hook command strings come **only from the user's own config files**, never from model output; tool arguments are passed via environment variables, never interpolated into the command line |
 | Credentials | Stored in `<dataDir>/credentials.json`, file-ACL'd to the invoking user; `.env` / common secret filenames are redacted in `read` **and** `grep` output by default |
 | `ap serve` | Binds `127.0.0.1` by default (not `0.0.0.0`). Non-loopback binds require a bearer token (`--token` / `AP_SERVE_TOKEN`); `/health` does not advertise provider/model |
-| Fetch | Cloud metadata / link-local hosts (`169.254.0.0/16`, `metadata.google.internal`, …) are refused; final post-redirect URL is re-checked |
+| Fetch | Cloud metadata / link-local hosts (`169.254.0.0/16`, `metadata.google.internal`, …) are refused; DNS is resolved and the connection pinned to a vetted address, and every redirect is validated before connecting |
 | Resource limits | Per-command timeouts with process-tree kill, output caps on every tool (30–50KB), context budget, abort on Ctrl+C |
 | Background logs | Written under the user's own data dir; pruned automatically after 7 days |
 | Supply chain | Zero runtime dependencies (Bun built-ins only); npm releases are published from GitHub Actions with provenance attestation |
