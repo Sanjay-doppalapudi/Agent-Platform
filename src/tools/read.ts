@@ -1,4 +1,4 @@
-import { ensureReadable, isEnvFile, looksBinaryByExt, redactEnvContent, resolvePath, sniffBinary, ToolError } from "./shared.ts";
+import { ensureReadable, isEnvFile, isSecretFile, looksBinaryByExt, redactEnvContent, resolvePath, sniffBinary, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 const MAX_LINES = 2000;
@@ -23,8 +23,13 @@ export async function readTool(
   }
 
   let content = new TextDecoder().decode(bytes);
-  if (isEnvFile(path) && ctx.config.redactEnv) {
+  if (ctx.config.redactEnv && isEnvFile(path)) {
     content = redactEnvContent(content);
+  } else if (ctx.config.redactEnv && isSecretFile(path)) {
+    // JSON/YAML manifests and raw key material use different syntaxes. Do not
+    // pretend the .env redactor covers them — suppress their body until a
+    // format-aware redactor exists.
+    return `secret file (${bytes.length} bytes): ${path} — contents redacted`;
   }
 
   const lines = content.split("\n");

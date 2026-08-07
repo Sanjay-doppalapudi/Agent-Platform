@@ -1,4 +1,4 @@
-import { allIgnores, ensureReadable, privateExcludeGlobs, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
+import { allIgnores, ensureReadable, privateExcludeGlobs, redactGrepLine, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
 
 const MAX_BYTES = 30_000;
@@ -54,6 +54,11 @@ export async function grepTool(
   if (lines.length > MAX_MATCHES) {
     note = `\n[showing ${MAX_MATCHES} of ${lines.length} lines — narrow the pattern]`;
     lines = lines.slice(0, MAX_MATCHES);
+  }
+  // read() redacts .env values — grep must too, or searching for API_KEY=
+  // is a one-line bypass of the entire redaction layer.
+  if (ctx.config.redactEnv && mode === "content") {
+    lines = lines.map(redactGrepLine);
   }
   return truncateMiddle(lines.join("\n"), MAX_BYTES) + note;
 }

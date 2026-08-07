@@ -53,6 +53,23 @@ describe("read on a CRLF .env", () => {
   });
 });
 
+describe("read on non-.env secret files", () => {
+  const SECRET = "sk-JSON-YAML-CANARY";
+
+  for (const [name, content] of [
+    ["secrets.json", `{"apiKey":"${SECRET}"}`],
+    ["secrets.yaml", `apiKey: ${SECRET}\n`],
+  ]) {
+    test(`${name} never reaches the model through the env redactor`, async () => {
+      const w = ws();
+      writeFileSync(join(w.cwd, name), content);
+      const r = await execTool("read", JSON.stringify({ path: name }), w.ctx);
+      expect(r.output).not.toContain(SECRET);
+      expect(r.output).toContain("contents redacted");
+    });
+  }
+});
+
 describe("edit does not interpret $ substitution patterns", () => {
   // REGRESSION: String.replace(old, string) expands $$, $&, $` and $'. `$'`
   // spliced the whole file tail in, silently duplicating it.

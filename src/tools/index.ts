@@ -183,7 +183,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "fetch",
-    description: "Fetch a URL and return its readable text (50KB cap); render=true for JS-heavy pages (headless system browser).",
+    description: "Fetch a URL and return its readable text (50KB cap).",
     parameters: {
       type: "object",
       properties: {

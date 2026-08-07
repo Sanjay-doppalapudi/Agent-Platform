@@ -1,5 +1,6 @@
 // Shared tool utilities: ignores, path handling, binary sniffing, redaction, truncation.
-import { isAbsolute, relative, resolve, basename, join } from "node:path";
+import { realpathSync } from "node:fs";
+import { isAbsolute, relative, resolve, basename, dirname, join } from "node:path";
 import { homedir, tmpdir } from "node:os";
 import type { Config } from "../config.ts";
 import type { ToolCtx } from "./index.ts";
@@ -43,14 +44,43 @@ export function resolvePath(p: string, cwd: string): string {
   return isAbsolute(p) ? resolve(p) : resolve(cwd, p);
 }
 
-// ── Sandbox boundary (guardrail, not a VM: no symlink resolution, and bash
-// containment is pattern-based — see scanDangerous in bash.ts) ──────────────
+// ── Sandbox boundary (guardrail, not a VM: bash containment is still
+// pattern-based — see scanDangerous in bash.ts — but file tools resolve
+// symlinks before the containment check so a workspace link cannot point
+// at credentials or /etc) ───────────────────────────────────────────────────
 
-/** Directories the agent may mutate freely: workspace, data dir, session plans. */
+/**
+ * Directories the agent may mutate freely.
+ * Deliberately NOT the whole dataDir: that let the model plant skills,
+ * workflows, agents, and overwrite background/task indexes. Memory +
+ * artifacts are the only dataDir subtrees the prompt asks it to write.
+ * (When dataDir itself sits inside the workspace — e.g. `./.ap` — the
+ * workspace root alone would still allow those writes; see
+ * `isRestrictedDataDirPath`.)
+ */
 export function sandboxRoots(config: Config): string[] {
-  const roots = [config.cwd, config.dataDir];
+  const roots = [
+    config.cwd,
+    join(config.dataDir, "memory"),
+    join(config.dataDir, "artifacts"),
+  ];
   if (config.sessionId) roots.push(join(tmpdir(), ".ap", config.sessionId));
   return roots;
+}
+
+/** dataDir subtrees the model may write without a permit. */
+export function dataDirWriteRoots(config: Config): string[] {
+  return [join(config.dataDir, "memory"), join(config.dataDir, "artifacts")];
+}
+
+/**
+ * True when `target` is under dataDir but outside memory/artifacts.
+ * Hard-denied for writes even if dataDir is nested inside the workspace
+ * (otherwise narrowing sandboxRoots is a no-op for `./.ap` layouts).
+ */
+export function isRestrictedDataDirPath(target: string, config: Config): boolean {
+  if (!isInsideRoots(target, [config.dataDir])) return false;
+  return !isInsideRoots(target, dataDirWriteRoots(config));
 }
 
 export function isInsideRoots(target: string, roots: string[]): boolean {
@@ -61,6 +91,33 @@ export function isInsideRoots(target: string, roots: string[]): boolean {
     if (rel === "" || (!rel.startsWith("..") && !isAbsolute(rel))) return true;
   }
   return false;
+}
+
+/**
+ * Resolve symlinks/junctions before containment checks. For paths that do
+ * not exist yet (write/create), resolve the nearest existing ancestor and
+ * rejoin the remainder — otherwise `ln -s /etc workspace/x` + `read x/passwd`
+ * would pass a workspace-relative check and then follow the link.
+ */
+export function canonicalPath(target: string): string {
+  try {
+    return realpathSync(target);
+  } catch {
+    // Walk up until an ancestor exists (or we hit the root).
+    let rest = basename(target);
+    let dir = dirname(target);
+    for (;;) {
+      try {
+        return join(realpathSync(dir), rest);
+      } catch {
+        const parent = dirname(dir);
+        if (parent === dir) return target; // filesystem root, nothing to resolve
+        rest = join(basename(dir), rest);
+        dir = parent;
+      }
+    }
+    return target;
+  }
 }
 
 /** Directories the agent may READ freely: workspace + skills/memory/commands + session plans. */
@@ -116,12 +173,27 @@ export function privateExcludeGlobs(config: Config, searchRoot: string): string[
 /** Gate a read: private → hard deny; outside read roots → permission. */
 export async function ensureReadable(path: string, ctx: ToolCtx): Promise<void> {
   if (ctx.config.sandbox === "off") return;
-  if (isPrivatePath(path, ctx.config)) {
+  const canon = canonicalPath(path);
+  // Check BOTH the lexical path and the symlink target — a link whose name
+  // sits inside the workspace must not reveal private data behind it.
+  if (isPrivatePath(path, ctx.config) || isPrivatePath(canon, ctx.config)) {
     throw new ToolError(
       `denied: ${path} is AP-private data (session transcripts, checkpoints, credentials) — never readable. Stay within ${ctx.config.cwd}.`,
     );
   }
-  if (isInsideRoots(path, readRoots(ctx.config))) return;
+  if (isInsideRoots(canon, readRoots(ctx.config)) || isInsideRoots(path, readRoots(ctx.config))) {
+    // Still require the canonical target to be inside read roots when it
+    // differs (symlink escape to /etc, ~/.ssh, …).
+    if (canon !== path && !isInsideRoots(canon, readRoots(ctx.config))) {
+      const okLink = await ctx.permit({ action: "read outside workspace (symlink)", detail: `${path} → ${canon}`, path: canon });
+      if (!okLink) {
+        throw new ToolError(
+          `denied: ${path} resolves outside the workspace (→ ${canon}) — remove the symlink or work within ${ctx.config.cwd}`,
+        );
+      }
+    }
+    return;
+  }
   const ok = await ctx.permit({ action: "read outside workspace", detail: path, path });
   if (!ok) {
     throw new ToolError(
@@ -134,10 +206,28 @@ export async function ensureReadable(path: string, ctx: ToolCtx): Promise<void> 
 /** Gate a mutating file action: inside the sandbox → free; outside → permission. */
 export async function ensureAllowed(path: string, ctx: ToolCtx, action: string): Promise<void> {
   if (ctx.config.sandbox === "off") return;
-  if (isPrivatePath(path, ctx.config)) {
+  const canon = canonicalPath(path);
+  if (isPrivatePath(path, ctx.config) || isPrivatePath(canon, ctx.config)) {
     throw new ToolError(`denied: ${path} is AP-private data (session transcripts, checkpoints, credentials) — never writable.`);
   }
-  if (isInsideRoots(path, sandboxRoots(ctx.config))) return;
+  // Even when dataDir lives inside the workspace, only memory/ + artifacts/
+  // are model-writable. Permits cannot override — same tier as private paths.
+  if (isRestrictedDataDirPath(path, ctx.config) || isRestrictedDataDirPath(canon, ctx.config)) {
+    throw new ToolError(
+      `denied: ${path} is under AP's data dir — only memory/ and artifacts/ are writable there (skills, agents, workflows, logs are not).`,
+    );
+  }
+  if (isInsideRoots(canon, sandboxRoots(ctx.config)) || isInsideRoots(path, sandboxRoots(ctx.config))) {
+    if (canon !== path && !isInsideRoots(canon, sandboxRoots(ctx.config))) {
+      const okLink = await ctx.permit({ action: `${action} outside workspace (symlink)`, detail: `${path} → ${canon}`, path: canon });
+      if (!okLink) {
+        throw new ToolError(
+          `denied: ${path} resolves outside the workspace sandbox (→ ${canon}) — work within ${ctx.config.cwd}`,
+        );
+      }
+    }
+    return;
+  }
   const ok = await ctx.permit({ action, detail: path, path });
   if (!ok) {
     throw new ToolError(
@@ -173,6 +263,17 @@ export function isEnvFile(path: string): boolean {
   return name === ".env" || name.startsWith(".env.");
 }
 
+/** Common secret-bearing filenames beyond `.env` (read + grep redaction). */
+export function isSecretFile(path: string): boolean {
+  if (isEnvFile(path)) return true;
+  const name = basename(path).toLowerCase();
+  if (name === "credentials.json" || name === "credentials.yml" || name === "credentials.yaml") return true;
+  if (name === "secrets.json" || name === "secrets.yml" || name === "secrets.yaml") return true;
+  if (/\.(pem|p12|pfx|key)$/i.test(name)) return true;
+  if (name === "id_rsa" || name === "id_ed25519" || name === "id_ecdsa" || name === "id_dsa") return true;
+  return false;
+}
+
 /** Mask values in .env content: KEY=*** (model sees keys, never values). */
 export function redactEnvContent(content: string): string {
   // Split on ALL line-ending flavours. Splitting on "\n" alone left a trailing
@@ -186,6 +287,25 @@ export function redactEnvContent(content: string): string {
       return m && m[2]!.trim() ? `${m[1]}***` : line;
     })
     .join("\n");
+}
+
+/**
+ * Redact a single ripgrep content line when it came from a secret file.
+ * Formats: `path:line:text` (match) and `path-line-text` (context).
+ */
+export function redactGrepLine(line: string): string {
+  const m = line.match(/^(.+?)([:-])(\d+)\2(.*)$/);
+  if (!m) return line;
+  const file = m[1]!;
+  if (!isSecretFile(file) && !isEnvFile(file)) return line;
+  const body = m[4]!;
+  // Prefer KEY=*** when it looks like an env assignment; otherwise mask the
+  // whole payload so pem/key material never reaches the model via grep.
+  const env = body.match(/^(\s*(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*\s*=)(.*)$/);
+  const redacted = env && env[2]!.trim()
+    ? `${env[1]}***`
+    : (body.trim() ? " ***" : body);
+  return `${file}${m[2]}${m[3]}${m[2]}${redacted}`;
 }
 
 /**

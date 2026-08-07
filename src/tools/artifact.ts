@@ -22,7 +22,10 @@ const MAX_HTML_BYTES = 2 * 1024 * 1024; // 2MB — an artifact is a page, not a 
  * closed by CSP at all, so inline script is the residual risk: keep pages
  * static unless there is a reason not to.
  */
-const CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; form-action 'none'; base-uri 'none'">`;
+// connect-src + frame-ancestors named explicitly: connect does not always
+// inherit default-src in older browsers the way we need, and framing an
+// artifact from an attacker page was an easy clickjacking vector.
+const CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; form-action 'none'; base-uri 'none'; connect-src 'none'; frame-ancestors 'none'">`;
 
 export function slugify(title: string): string {
   const s = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);

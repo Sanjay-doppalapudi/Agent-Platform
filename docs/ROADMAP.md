@@ -5,7 +5,7 @@ Generated 2026-08-01, status updated 2026-08-04. Sources surveyed: opencode, Cla
 ## Status (2026-08-04) — shipped since this survey
 
 - **All of P0 and P1** (checkpoints/undo, subagents, custom commands, AGENTS.md, @file, tool hooks, /compact, session search, worktrees, fetch+todo tools, resume picker).
-- **Web**: `websearch` (DuckDuckGo scrape) + `fetch render:true` (system Chrome/Edge headless).
+- **Web**: `websearch` (DuckDuckGo scrape) + plain `fetch`; browser rendering is disabled until it can enforce the hostname policy across redirects.
 - **Loop mode** (`ap loop`): work→check→audit until verifiably done; stall detection, compaction, per-iteration diffs, LOOP_BLOCKED.
 - **Read-scoped sandbox**: reads outside the workspace permit-gated, AP-private data hard-denied, bash path scanning.
 - **Skills**: skills.sh / Claude Code SKILL.md packs, zero-dep GitHub installer.

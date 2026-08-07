@@ -86,6 +86,8 @@ describe("AUDIT fixes", () => {
     expect(out).toContain("form-action 'none'");
     expect(out).toContain("base-uri 'none'");
     expect(out).toContain("default-src 'none'");
+    expect(out).toContain("connect-src 'none'");
+    expect(out).toContain("frame-ancestors 'none'");
   });
 
   test("same-second artifacts do not overwrite each other", async () => {
