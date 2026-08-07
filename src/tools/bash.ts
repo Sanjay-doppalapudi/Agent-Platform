@@ -14,8 +14,9 @@ import { spawn } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import { isInsideRoots, isPrivatePath, readRoots, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
+import { isInsideRoots, isPrivatePath, isRestrictedDataDirPath, readRoots, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
+import { relative, isAbsolute } from "node:path";
 
 // Dangerous-command patterns: auto-BLOCKED (never prompted), warned, and
 // logged to <dataDir>/blocked-commands.jsonl so the user can report the model.
@@ -33,7 +34,18 @@ const DANGEROUS: [RegExp, string][] = [
   [/(^|[;&|]\s*|\bsudo\s+)shutdown\b/i, "system shutdown/restart"],
   [/\btaskkill\b[^&|;]*\/f[^&|;]*\/im/i, "force-kill processes by name"],
   [/:\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;/, "fork bomb"],
-  [/\b(curl|wget|irm|iwr)\b[^&|;]*\|\s*(bash|sh|iex|powershell)/i, "piping a download straight into a shell"],
+  // Pipe-to-shell, including `curl … | sudo bash` (sudo was a prior bypass).
+  [/\b(curl|wget|irm|iwr)\b[^&|;]*\|\s*(sudo\s+)?(bash|sh|iex|powershell)\b/i, "piping a download straight into a shell"],
+  // Process substitution: bash <(curl …) downloads and executes without a pipe.
+  [/\b(bash|sh)\s+<\(/i, "process-substitution shell of a download"],
+  [/\b(bash|sh)\s+-c\s+["'][^"']*\b(curl|wget)\b/i, "shell -c wrapping a download"],
+  // PowerShell download cradles (pipe form above misses `iex (iwr …)`).
+  // Command-position / call-form only — mentioning the words in echo/commit text is fine.
+  [/(^|[;&|]\s+)(iex|invoke-expression)\b/i, "PowerShell Invoke-Expression"],
+  [/\biex\s*\(/i, "PowerShell Invoke-Expression"],
+  [/\bpowershell\b[^&|;]*-(?:enc|encodedcommand)\b/i, "encoded PowerShell"],
+  [/\bfind\b[^&|;]*-delete\b/i, "find -delete"],
+  [/\b(chmod|chown|chgrp)\b[^&|;]*\s+\/(?:\s|$)/i, "permission change on filesystem root"],
 ];
 
 export function scanDangerous(cmd: string): string | null {
@@ -44,7 +56,11 @@ export function scanDangerous(cmd: string): string | null {
 // Absolute-ish path tokens inside a shell command (win drive, git-bash /c/,
 // unix homes, ~, $HOME, %USERPROFILE%). Best-effort — this is the same
 // guardrail-not-VM stance as scanDangerous.
-const PATH_TOKEN_RE = /(?:[A-Za-z]:[\\/]|\/(?:[a-z])\/|\/home\/|\/Users\/|\/etc\/|\/var\/|~[\\/]|\$HOME\b|%USERPROFILE%|\$env:USERPROFILE)[^\s"'`;|&<>()*]*/g;
+//
+// Windows drive letters use a lookbehind so `http://…` does NOT match as
+// drive `P:` (the prior `p:/` false positive made URL commands look like
+// in-workspace relative paths and skipped the outside-path gate).
+const PATH_TOKEN_RE = /(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\/(?:[a-z])\/|\/(?:home|Users|etc|var|root|dev|proc|sys|boot|opt|usr)\/|~[\\/]|\$HOME\b|%USERPROFILE%|\$env:USERPROFILE)[^\s"'`;|&<>()*]*/g;
 
 /** Paths a command references outside the readable roots. {priv} = AP-private. */
 export function scanCmdPaths(
@@ -57,11 +73,21 @@ export function scanCmdPaths(
   for (const m of cmd.match(PATH_TOKEN_RE) ?? []) {
     let p = m.replace(/^~(?=[\\/])/, homedir()).replace(/^(\$HOME|%USERPROFILE%|\$env:USERPROFILE)/, homedir());
     p = resolvePath(p.replace(/[.,:]+$/, ""), ctx.cwd);
-    if (isPrivatePath(p, ctx.config)) priv.add(p);
+    if (isPrivatePath(p, ctx.config) || isRestrictedDataDirPath(p, ctx.config)) priv.add(p);
     else if (!isInsideRoots(p, roots)) outside.add(p);
   }
   // Relative escapes: ../ chains or a bare `cd ..` step out of the workspace.
   if (/(?:^|[\s"'=(])\.\.[\\/]|\bcd\s+\.\.(?![\w.])/.test(cmd)) outside.add("(relative path escaping the workspace via ..)");
+  // When dataDir sits inside the workspace (./.ap), absolute-token scanning
+  // never sees writes like `echo x > .ap/skills/evil`. Flag relative mentions
+  // of non-writable dataDir subtrees the same way we flag private paths.
+  const relData = relative(ctx.cwd, ctx.config.dataDir).replace(/\\/g, "/");
+  if (relData && !relData.startsWith("..") && !isAbsolute(relData)) {
+    const esc = relData.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`${esc}/(?!memory(?:/|$)|artifacts(?:/|$))[^\\s"'\\\`;|&<>]*`, "i");
+    const hit = cmd.replace(/\\/g, "/").match(re);
+    if (hit) priv.add(resolvePath(hit[0]!, ctx.cwd));
+  }
   return { outside: [...outside].slice(0, 5), priv: [...priv].slice(0, 5) };
 }
 
@@ -146,7 +172,7 @@ export async function bashTool(
     const { outside, priv } = scanCmdPaths(args.cmd + (args.cwd ? ` ${args.cwd}` : ""), ctx);
     if (priv.length) {
       throw new ToolError(
-        `denied: command references AP-private data (${priv.join(", ")}) — session transcripts, checkpoints and credentials are never accessible. Stay within ${ctx.cwd}.`,
+        `denied: command references AP-private or restricted data-dir paths (${priv.join(", ")}) — sessions, checkpoints, credentials, and non-memory/artifacts dataDir paths are never accessible. Stay within ${ctx.cwd}.`,
       );
     }
     if (outside.length) {

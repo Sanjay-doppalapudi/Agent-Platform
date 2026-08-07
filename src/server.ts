@@ -8,6 +8,11 @@
 //   GET  /session/:id/events                    → SSE scoped to one session
 //   GET  /session/:id/messages                  → Msg[]
 //   DELETE /session/:id
+//
+// SECURITY: binds 127.0.0.1 by default (Bun's default is 0.0.0.0). Non-loopback
+// binds require a bearer token (--token / AP_SERVE_TOKEN); loopback can omit
+// it. Unauthenticated network exposure previously meant anyone on the LAN
+// could spend the user's API key and run tools as them.
 import { loadConfig, resolveProvider, type ResolvedProvider } from "./config.ts";
 import { routeTargets } from "./router.ts";
 import { initMcp } from "./mcp.ts";
@@ -15,7 +20,7 @@ import { runTurn, type AgentEvent } from "./agent.ts";
 import { Session } from "./session.ts";
 import type { CliFlags } from "./index.ts";
 
-const VERSION = "0.1.0";
+const VERSION = "0.1.15";
 
 interface Live {
   session: Session;
@@ -25,6 +30,11 @@ interface Live {
   closed?: boolean; // DELETE received: refuse new work, let the current run drain
 }
 
+function isLoopbackHost(host: string): boolean {
+  const h = host.toLowerCase();
+  return h === "127.0.0.1" || h === "localhost" || h === "::1" || h === "[::1]";
+}
+
 export async function serveMain(flags: CliFlags) {
   const baseConfig = loadConfig(flags);
   const provider: ResolvedProvider | ResolvedProvider[] = baseConfig.router?.targets?.length
@@ -32,6 +42,15 @@ export async function serveMain(flags: CliFlags) {
     : resolveProvider(baseConfig, flags);
   const primary = Array.isArray(provider) ? provider[0]! : provider;
   const port = flags.port ?? 4141;
+  const hostname = flags.host ?? "127.0.0.1";
+  const loopback = isLoopbackHost(hostname);
+
+  let token = flags.token ?? process.env.AP_SERVE_TOKEN ?? "";
+  if (!loopback && !token) {
+    token = crypto.randomUUID().replace(/-/g, "");
+    console.error(`⚠ non-loopback bind (${hostname}) — generated serve token (pass Authorization: Bearer <token>)`);
+    console.error(`  AP_SERVE_TOKEN=${token}`);
+  }
 
   // MCP binds to the server's base cwd once per process; per-session cwds
   // share the same tool set (schema stability across all sessions).
@@ -50,6 +69,18 @@ export async function serveMain(flags: CliFlags) {
 
   const json = (data: unknown, status = 200) =>
     new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
+
+  /** Bearer header, or ?token= for EventSource clients that cannot set headers. */
+  const authorized = (req: Request): boolean => {
+    if (!token) return true;
+    const h = req.headers.get("authorization") ?? "";
+    if (h === `Bearer ${token}`) return true;
+    try {
+      return new URL(req.url).searchParams.get("token") === token;
+    } catch {
+      return false;
+    }
+  };
 
   const sse = (sessionId: string | null): Response => {
     let sub: Subscriber;
@@ -80,14 +111,27 @@ export async function serveMain(flags: CliFlags) {
 
   const server = Bun.serve({
     port,
+    hostname,
     idleTimeout: 0,
     async fetch(req) {
       const url = new URL(req.url);
       const path = url.pathname;
 
       if (req.method === "GET" && path === "/health") {
-        return json({ ok: true, version: VERSION, provider: primary.name, model: primary.model, targets: Array.isArray(provider) ? provider.map((p) => `${p.name}/${p.model}`) : undefined });
+        // Intentionally does NOT leak provider/model — that advertised which
+        // billed account an unauthenticated scanner had found.
+        return json({
+          ok: true,
+          version: VERSION,
+          auth: token ? "required" : "off",
+          host: hostname,
+        });
       }
+
+      if (!authorized(req)) {
+        return json({ error: "unauthorized — pass Authorization: Bearer <token> (or ?token=)" }, 401);
+      }
+
       if (req.method === "GET" && path === "/event") return sse(null);
 
       // Generated artifacts (artifact tool). Filename alphabet is validated
@@ -101,7 +145,17 @@ export async function serveMain(flags: CliFlags) {
         if (!file.startsWith(dir)) return json({ error: "not found" }, 404);
         const f = Bun.file(file);
         if (!(await f.exists())) return json({ error: "not found" }, 404);
-        return new Response(f, { headers: { "content-type": "text/html; charset=utf-8" } });
+        // CSP header reinforces the in-page meta (and blocks connect-src even
+        // if a page strips its own meta). Scripts stay inline-only for the
+        // interactive-artifact use case; network egress is denied.
+        return new Response(f, {
+          headers: {
+            "content-type": "text/html; charset=utf-8",
+            "content-security-policy":
+              "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; form-action 'none'; base-uri 'none'; connect-src 'none'; frame-ancestors 'none'",
+            "x-content-type-options": "nosniff",
+          },
+        });
       }
 
       if (req.method === "POST" && path === "/session") {
@@ -195,5 +249,8 @@ export async function serveMain(flags: CliFlags) {
     },
   });
 
-  console.log(`AP serving on http://localhost:${server.port} · ${primary.name}/${primary.model}`);
+  const authNote = token
+    ? ` · auth required (Authorization: Bearer …)`
+    : ` · auth off (loopback only)`;
+  console.log(`AP serving on http://${hostname === "0.0.0.0" ? "127.0.0.1" : hostname}:${server.port}${authNote} · ${primary.name}/${primary.model}`);
 }

@@ -47,14 +47,29 @@ function scanDir(dir: string, source: string, into: Map<string, SkillInfo>) {
   }
 }
 
+// Process-lifetime cache (same rationale as agents.ts): discovery is walked
+// from the system-prompt builder and from CLI list/install paths; rescanning
+// every call was pure overhead once the session snapshot is fixed.
+const skillCache = new Map<string, SkillInfo[]>();
+
 /** All available skills: project .ap/skills > .claude/skills > <dataDir>/skills > ~/.claude/skills. */
 export function discoverSkills(config: Config): SkillInfo[] {
+  const key = `${config.dataDir}|${config.cwd}`;
+  const hit = skillCache.get(key);
+  if (hit) return hit;
   const found = new Map<string, SkillInfo>();
   scanDir(join(config.cwd, ".ap", "skills"), "project", found);
   scanDir(join(config.cwd, ".claude", "skills"), "project", found);
   scanDir(join(config.dataDir, "skills"), "global", found);
   scanDir(join(homedir(), ".claude", "skills"), "claude", found);
-  return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const list = [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+  skillCache.set(key, list);
+  return list;
+}
+
+/** Test helper / post-install refresh. */
+export function clearSkillCache(): void {
+  skillCache.clear();
 }
 
 const MAX_PROMPT_SKILLS = 30;
@@ -166,12 +181,19 @@ export async function installSkill(
     writeFileSync(dest, Buffer.from(await raw.arrayBuffer()));
     log(`  + ${rel}`);
   }
+  clearSkillCache();
   return destRoot;
 }
 
 export function removeSkill(dataDir: string, name: string): boolean {
-  const dir = join(dataDir, "skills", name);
+  // Names are identifiers — never path segments. Without this check,
+  // `ap skills remove ../credentials.json`-style input could traverse.
+  if (!safeSkillPath(name) || name.includes("/")) return false;
+  const root = resolve(dataDir, "skills");
+  const dir = resolve(root, name);
+  if (!dir.startsWith(root + sep) && dir !== root) return false;
   if (!existsSync(join(dir, "SKILL.md"))) return false;
   rmSync(dir, { recursive: true, force: true });
+  clearSkillCache();
   return true;
 }

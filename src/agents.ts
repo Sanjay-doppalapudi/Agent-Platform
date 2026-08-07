@@ -62,13 +62,30 @@ function scanDir(dir: string, source: string, into: Map<string, AgentDef>) {
   }
 }
 
+// Process-lifetime cache: discovery walks the filesystem, and the agent tool
+// used to rescan on EVERY delegation. Caching also closes a mid-session
+// plant-and-invoke hole (model writes .ap/agents/x.md then immediately calls
+// agent{name:x}) — profiles appear on the next process, matching the prompt
+// snapshot semantics for skills/memory.
+const agentCache = new Map<string, AgentDef[]>();
+
 /** All defined agents: .ap/agents > .claude/agents > <dataDir>/agents. */
 export function discoverAgents(config: Config): AgentDef[] {
+  const key = `${config.dataDir}|${config.cwd}`;
+  const hit = agentCache.get(key);
+  if (hit) return hit;
   const found = new Map<string, AgentDef>();
   scanDir(join(config.cwd, ".ap", "agents"), "project", found);
   scanDir(join(config.cwd, ".claude", "agents"), "claude", found);
   scanDir(join(config.dataDir, "agents"), "global", found);
-  return [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+  const list = [...found.values()].sort((a, b) => a.name.localeCompare(b.name));
+  agentCache.set(key, list);
+  return list;
+}
+
+/** Test helper — drop the discovery cache between cases. */
+export function clearAgentCache(): void {
+  agentCache.clear();
 }
 
 export function getAgent(config: Config, name: string): AgentDef | null {

@@ -2,7 +2,7 @@
 // Entry point: parse argv, dispatch to a mode via lazy import so the hot path
 // (startup → first prompt) loads only what it needs.
 
-const VERSION = "0.1.14";
+const VERSION = "0.1.15";
 
 export interface CliFlags {
   provider?: string;
@@ -16,6 +16,10 @@ export interface CliFlags {
   continue?: boolean;
   json?: boolean;
   port?: number;
+  /** Bind address for `ap serve` (default 127.0.0.1 — not 0.0.0.0). */
+  host?: string;
+  /** Bearer token for `ap serve` (required for non-loopback binds). */
+  token?: string;
   prompt?: string;
   system?: string;
   noSandbox?: boolean;
@@ -46,6 +50,8 @@ function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string
       case "--continue": case "-c": flags.continue = true; break;
       case "--json": flags.json = true; break;
       case "--port": flags.port = Number(argv[++i]); break;
+      case "--host": flags.host = argv[++i]; break;
+      case "--token": flags.token = argv[++i]; break;
       case "--prompt": case "-p": flags.prompt = argv[++i]; break;
       case "--system": flags.system = argv[++i]; break;
       case "--no-sandbox": flags.noSandbox = true; break;
@@ -146,7 +152,11 @@ const HELP_TOPICS: Record<string, string> = {
   If a server command needs flags that collide with ap's own (-m, --port, …),
   add the entry to the JSON file directly instead of via "ap mcp add".`,
 
-  serve: `ap serve [--port 4141] — HTTP server mode
+  serve: `ap serve [--port 4141] [--host 127.0.0.1] [--token secret] — HTTP server
+
+  Binds 127.0.0.1 by default (not 0.0.0.0). Non-loopback hosts require a
+  bearer token (--token or AP_SERVE_TOKEN); one is generated and printed if
+  you omit it. Pass Authorization: Bearer <token>, or ?token= for SSE.
 
   POST /session {cwd?}                    → {id}
   POST /session/:id/message {text, ...}   → blocks → {text, messages}
@@ -188,7 +198,7 @@ Usage:
   ap loop -p "goal"        loop work→verify until the goal is verifiably done
   ap flow <name> [args…]   run a workflow script (.ap/workflows/<name>.ts)
   ap watch                 live view of running ap sessions, agents and flows
-  ap serve [--port 4141]   HTTP server mode (sessions + SSE)
+  ap serve [--port 4141]   HTTP server (loopback + optional bearer token)
   ap acp                   ACP agent for editors (Zed): stdio, modes, permissions
   ap skills [add|remove]   list/install SKILL.md packs (skills.sh compatible)
   ap mcp [add|call|...]    connect MCP servers — their tools become agent tools
