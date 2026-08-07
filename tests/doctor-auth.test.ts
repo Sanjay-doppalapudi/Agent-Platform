@@ -55,7 +55,10 @@ describe("doctor validates the key against the provider", () => {
       const checks = await runChecks(configFor(srv.port), { mcp: false });
       expect(auth(checks).state).toBe("ok");
       expect(auth(checks).detail).toContain("accepted the key");
-      expect(overallState(checks)).not.toBe("fail");
+      // Scoped to auth on purpose. overallState also folds in environment
+      // checks (ripgrep, git) that depend on the machine, so asserting on it
+      // here made a working key look broken on any box without ripgrep.
+      expect(checks.filter((c) => c.state === "fail").map((c) => c.name)).not.toContain("auth");
     } finally { srv.stop(true); }
   });
 
