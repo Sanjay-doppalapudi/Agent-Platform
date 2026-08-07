@@ -99,6 +99,9 @@ async function runCommand(live: AcpLive, name: string, arg: string): Promise<str
       const prov = slash > 0 ? arg.slice(0, slash) : "";
       if (prov && live.config.providers[prov]) {
         live.provider = resolveProvider({ ...live.config, provider: prov }, { model: arg.slice(slash + 1) } as CliFlags);
+      } else if (prov) {
+        const { resolveCatalogProvider } = await import("./models.ts");
+        live.provider = await resolveCatalogProvider(live.config, prov, arg.slice(slash + 1));
       } else {
         live.provider = { ...live.provider, model: arg };
       }

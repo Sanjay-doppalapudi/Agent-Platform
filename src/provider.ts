@@ -29,8 +29,12 @@ export class ProviderError extends Error {
   }
 }
 
-// Providers that reject stream_options get it dropped for the rest of the process.
-let streamOptionsOk = true;
+// Providers that reject stream_options get it dropped for that provider only.
+const streamOptionsOk = new Map<string, boolean>();
+
+function providerKey(provider: ResolvedProvider): string {
+  return `${provider.name}\u0000${provider.baseUrl}`;
+}
 
 const MAX_ATTEMPTS = 3;
 
@@ -65,13 +69,15 @@ export async function streamChat(
     }
     retryAfterMs = undefined;
 
+    const key = providerKey(provider);
+    const supportsStreamOptions = streamOptionsOk.get(key) ?? true;
     const body: Record<string, unknown> = {
+      ...(extra ?? {}),
       model: provider.model,
       messages: withCacheControl(provider, messages),
       stream: true,
-      ...(streamOptionsOk ? { stream_options: { include_usage: true } } : {}),
+      ...(supportsStreamOptions ? { stream_options: { include_usage: true } } : {}),
       ...(tools.length ? { tools } : {}),
-      ...extra,
     };
 
     let res: Response;
@@ -91,8 +97,8 @@ export async function streamChat(
     if (!res.ok) {
       const text = await res.text().catch(() => "");
       // Some providers 400 on stream_options — drop it once and retry immediately.
-      if (res.status === 400 && streamOptionsOk && /stream_options/i.test(text)) {
-        streamOptionsOk = false;
+      if (res.status === 400 && supportsStreamOptions && /stream_options/i.test(text)) {
+        streamOptionsOk.set(key, false);
         attempt--;
         continue;
       }

@@ -18,6 +18,7 @@ import { bashTool } from "./bash.ts";
 import { globTool } from "./glob.ts";
 import { grepTool } from "./grep.ts";
 import { agentTool } from "./agent.ts";
+import { artifactTool } from "./artifact.ts";
 import { fetchTool } from "./fetch.ts";
 import { todoTool } from "./todo.ts";
 import { websearchTool } from "./websearch.ts";
@@ -146,7 +147,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "agent",
-    description: "Delegate an independent subtask to a parallel subagent; returns its final answer.",
+    description: "Delegate an independent subtask to a parallel subagent; returns its final answer. background:true detaches it — the tool returns immediately and the result arrives with the next turn.",
     parameters: {
       type: "object",
       properties: {
@@ -154,6 +155,7 @@ export const TOOLS: ToolDef[] = [
         name: { type: "string", description: "named agent profile to run as (see Named agents)" },
         cwd: { type: "string" },
         timeout: { type: "number", description: "seconds, default 300" },
+        background: { type: "boolean", description: "run detached; result is delivered as a note on the next turn" },
       },
       required: ["task"],
     },
@@ -161,6 +163,23 @@ export const TOOLS: ToolDef[] = [
     parallelSafe: true, // children serialize their own mutations
     fullOnly: true,
     run: agentTool,
+  },
+  {
+    name: "artifact",
+    description: "Save a self-contained HTML page (report, diagram, dashboard) the user can open in a browser. Inline CSS/JS only — a no-network CSP is enforced.",
+    parameters: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "human title; also derives the filename" },
+        html: { type: "string", description: "complete self-contained HTML (2MB cap, no external resources)" },
+        slug: { type: "string", description: "optional filename slug [a-z0-9-]" },
+      },
+      required: ["title", "html"],
+    },
+    readOnly: false,
+    parallelSafe: true, // each call writes a distinct timestamped file
+    fullOnly: true,
+    run: artifactTool,
   },
   {
     name: "fetch",
@@ -286,7 +305,7 @@ function normalizeArgs(name: string, args: any): any {
 }
 
 /** JSON.parse with cheap repairs for common model mistakes. Throws if hopeless. */
-function parseArgsLenient(raw: string): any {
+export function parseArgsLenient(raw: string): any {
   if (!raw || !raw.trim()) return {};
   let s = raw.trim();
   try {

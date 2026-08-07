@@ -16,7 +16,8 @@ import { readLine, type SlashCommand } from "./input.ts";
 import { MdRenderer } from "./md.ts";
 import { errorHint, renderDiff, toolLabel, toolSummary } from "./ui.ts";
 import { Session } from "./session.ts";
-import { currentTheme, EFFORT_LEVELS, frameBottom, frameTop, frameWidth, paint, parseEffort, setTheme, themeNames, THEMES, type EffortLevel } from "./theme.ts";
+import { clearLive, publishLive } from "./live.ts";
+import { currentTheme, EFFORT_LEVELS, fitLine, fitSegments, frameBottom, frameTop, frameWidth, paint, parseEffort, setTheme, themeNames, THEMES, visibleLen, type EffortLevel, type StatusSegment } from "./theme.ts";
 import type { Usage } from "./stream.ts";
 import type { CliFlags } from "./index.ts";
 
@@ -61,20 +62,24 @@ const BUILTIN_CMDS = new Set([
   "exit", "q", "quit", "new", "resume", "session", "sessions", "sandbox",
   "model", "models", "mode", "plan", "code", "system", "context", "agents", "effort", "theme",
   "undo", "diff", "checkpoints", "restore", "worktree", "compact", "share", "ps", "commit",
+  "tasks", "flow", "artifacts", "watch",
 ]);
 
 const COMMANDS: SlashCommand[] = [
   { name: "/plan", desc: "read-only mode: explore & produce a plan" },
   { name: "/code", desc: "full mode: all tools (default)" },
-  { name: "/model", desc: "switch model, or provider/model", hasArg: true },
+  { name: "/model", desc: "pick provider → model (filterable, models.dev), or /model <provider>/<model>", hasArg: true },
   { name: "/effort", desc: "reasoning effort: low|medium|high|off (models.dev-aware)", hasArg: true },
-  { name: "/models", desc: "search the models.dev catalog", hasArg: true },
   { name: "/new", desc: "start a fresh session" },
   { name: "/resume", desc: "resume a session by id", hasArg: true },
   { name: "/sessions", desc: "list recent sessions" },
   { name: "/sandbox", desc: "show or toggle the write-sandbox", hasArg: true },
   { name: "/theme", desc: "list or switch color themes", hasArg: true },
   { name: "/agents", desc: "list subagents spawned this session" },
+  { name: "/tasks", desc: "background tasks: list | kill <id>", hasArg: true },
+  { name: "/flow", desc: "run a workflow script: /flow <name> [args…]", hasArg: true },
+  { name: "/artifacts", desc: "list generated artifacts" },
+  { name: "/watch", desc: "interactive viewer: agents, tasks, flows (←/→ switch · Esc back · ctrl+g mid-turn)" },
   { name: "/ps", desc: "background processes: list | tail <pid> | kill <pid>", hasArg: true },
   { name: "/skills", desc: "list available SKILL.md packs" },
   { name: "/mcp", desc: "list MCP servers and their tools" },
@@ -93,18 +98,36 @@ const COMMANDS: SlashCommand[] = [
 
 /** `extra` is appended to every frame — live elapsed/token state answers
  * "is it stuck?" with zero extra renders (the interval is already firing). */
-function makeSpinner(extra?: () => string) {
+/**
+ * Live status line. Redraws IN PLACE at the bottom of the output with
+ * `\r … \x1b[K`, so it is always the last thing on screen while a turn runs —
+ * the model, context, cost, running agents and the keys that work right now.
+ *
+ * Deliberately NOT a terminal scrolling region (DECSTBM). A reserved band at
+ * the screen's bottom edge sounds better, but DECSTBM homes the cursor every
+ * time it is set, so enabling one mid-turn always displaces the output — it
+ * left a block of blank rows between the prompt and the first token. Hiding
+ * that needs a full-screen clear at startup, which would throw away the
+ * normal terminal flow AP is built around. One in-place line has none of
+ * those failure modes and works on every terminal, including legacy conhost.
+ */
+function makeSpinner(extra?: () => string, status?: () => string) {
   const frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
   let timer: ReturnType<typeof setInterval> | null = null;
   let i = 0;
   let label = "thinking";
+  const render = () => {
+    const cols = Math.max(process.stdout.columns ?? 80, 20);
+    const head = `${frames[i++ % frames.length]} ${label}${extra?.() ?? ""}`;
+    const tail = status?.() ?? "";
+    const line = tail ? `${dim(head)}${dim(" · ")}${tail}` : dim(head);
+    process.stdout.write(`\r${fitLine(line, cols - 1)}\x1b[K`);
+  };
   return {
     start(newLabel = "thinking") {
       label = newLabel;
       if (timer || !process.stdout.isTTY) return;
-      timer = setInterval(() => {
-        process.stdout.write(`\r${dim(`${frames[i++ % frames.length]} ${label}${extra?.() ?? ""}`)}\x1b[K`);
-      }, 80);
+      timer = setInterval(render, 100);
     },
     stop() {
       if (!timer) return;
@@ -282,14 +305,23 @@ export async function replMain(flags: CliFlags) {
   // Live turn state for the spinner: elapsed seconds + rough output tokens.
   let turnT0 = 0;
   let turnOut = 0;
-  const spinner = makeSpinner(() => {
-    if (!turnT0) return "";
-    const s = Math.floor((performance.now() - turnT0) / 1000);
-    return `${s >= 1 ? ` · ${s}s` : ""}${turnOut ? ` · ~${Math.round(turnOut / 4)} tok` : ""}`;
-  });
+  const spinner = makeSpinner(
+    () => {
+      if (!turnT0) return "";
+      const s = Math.floor((performance.now() - turnT0) / 1000);
+      return `${s >= 1 ? ` · ${s}s` : ""}${turnOut ? ` · ~${Math.round(turnOut / 4)} tok` : ""}`;
+    },
+    // Live status rides on the spinner line: always the last row of output,
+    // always current, no cursor tricks.
+    () => (config.light ? "" : `${statusFor(false)}${dim(" · ctrl+g watch")}`),
+  );
   const history: string[] = [];
   // One-time contextual hints: teach a feature the first time it matters.
   const hinted = new Set<string>();
+
+  // Bottom bar pinned for the duration of each turn. Two rows: the status
+  // (model · ctx · cost · agents · flow) framed like the prompt box, plus a
+  // hint row. Only in the full profile on a TTY — --light stays frozen.
 
   // Reasoning effort: sent as `reasoning_effort` when set (/effort, config).
   let effort: EffortLevel | undefined = config.reasoningEffort;
@@ -299,44 +331,132 @@ export async function replMain(flags: CliFlags) {
   const spend = { prompt: 0, cached: 0, completion: 0 };
   let pricing: import("./models.ts").Pricing | null = null;
   let pricedFor = "";
+  /** Name of the workflow running right now (status + live snapshot). */
+  let activeFlow: string | null = null;
+  /** Last computed context %, reused by the cross-process live snapshot so it
+   *  never recomputes the (non-trivial) history scan. */
+  let lastCtxPct = 0;
 
   /** `muted` paints the low-emphasis segments. Inside the frame it is the
    *  border color, so the status reads as part of the border instead of a
-   *  white band across the bottom edge; standalone it is plain dim. */
-  const buildStatus = (inFrame = false): string => {
+   *  white band across the bottom edge; standalone it is plain dim.
+   *
+   *  Responsive: segments carry drop priorities and are shed under width
+   *  pressure (cost first, then effort, then agents — model and ctx% never
+   *  drop; the model falls back to its short name instead). A zoomed-in
+   *  terminal gets a status that FITS rather than a truncated one. */
+  const buildStatus = (inFrame = false, budget = Infinity): string => {
     const muted = inFrame ? edge : dim;
-    const parts: string[] = [muted(`${provider.name}/${provider.model}`)];
-    if (effort) parts.push(muted(`effort ${effort}`));
+    const sep = muted(" · ");
     let chars = 0;
     try {
       chars = buildSystemPrompt(config).length;
       for (const m of session.history) chars += JSON.stringify(m).length;
     } catch {}
     const pct = Math.min(999, Math.round((chars / config.contextBudgetChars) * 100));
-    parts.push(pct >= 85 ? red(`ctx ${pct}%`) : pct >= 60 ? yellow(`ctx ${pct}%`) : muted(`ctx ${pct}%`));
-    if (pricing && (spend.prompt || spend.completion)) {
-      const usd =
-        ((spend.prompt - spend.cached) * pricing.input +
-          spend.cached * (pricing.cacheRead ?? pricing.input) +
-          spend.completion * pricing.output) / 1e6;
-      if (usd > 0) parts.push(muted(`~$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(3)}`));
+    lastCtxPct = pct;
+    const make = (modelText: string): StatusSegment[] => {
+      const parts: StatusSegment[] = [{ text: muted(modelText), prio: 0 }];
+      if (effort) parts.push({ text: muted(`effort ${effort}`), prio: 3 });
+      parts.push({ text: pct >= 85 ? red(`ctx ${pct}%`) : pct >= 60 ? yellow(`ctx ${pct}%`) : muted(`ctx ${pct}%`), prio: 0 });
+      if (pricing && (spend.prompt || spend.completion)) {
+        const usd =
+          ((spend.prompt - spend.cached) * pricing.input +
+            spend.cached * (pricing.cacheRead ?? pricing.input) +
+            spend.completion * pricing.output) / 1e6;
+        if (usd > 0) parts.push({ text: muted(`~$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(3)}`), prio: 4 });
+      }
+      const subs = listSubagents();
+      if (subs.length) {
+        const running = subs.filter((s) => s.status === "running").length;
+        const dots = subs.slice(-8).map((s) =>
+          s.status === "running" ? yellow("●") : s.status === "done" ? green("●") : red("●")).join("");
+        // Running count first: "how many are working right now" is the live
+        // question; the total is history.
+        const label = running ? `◇ ${running}/${subs.length}` : `◇ ${subs.length}`;
+        parts.push({ text: `${muted(label)} ${dots} ${muted("/agents")}`, prio: 2 });
+      }
+      if (activeFlow) parts.push({ text: `${cyan("◆ flow")} ${muted(activeFlow)}`, prio: 1 });
+      return parts;
+    };
+    let s = fitSegments(make(`${provider.name}/${provider.model}`), budget, sep);
+    if (visibleLen(s) > budget) {
+      s = fitSegments(make(provider.model.split("/").pop() ?? provider.model), budget, sep);
     }
-    const subs = listSubagents();
-    if (subs.length) {
-      const dots = subs.slice(-8).map((s) =>
-        s.status === "running" ? yellow("●") : s.status === "done" ? green("●") : red("●")).join("");
-      parts.push(`${muted(`◇ ${subs.length}`)} ${dots} ${muted("/agents")}`);
-    }
-    return parts.join(muted(" · "));
+    return s;
   };
-  // Re-evaluated per keypress render — memoized so typing costs nothing.
-  let statusCache = { at: 0, s: "", frame: false };
+  /** Persist the chosen provider/model to <dataDir>/config.json, exactly like
+   *  /theme — the next `ap` starts on the model you last picked instead of the
+   *  config default. Returns a dim suffix for the confirmation line. */
+  const rememberModel = (providerName: string, model: string): string => {
+    try {
+      const p = join(config.dataDir, "config.json");
+      const cur = existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : {};
+      cur.provider = providerName;
+      cur.providers = { ...(cur.providers ?? {}), [providerName]: { ...(cur.providers?.[providerName] ?? {}), model } };
+      writeFileSync(p, JSON.stringify(cur, null, 2) + "\n");
+      return dim(" · saved as default");
+    } catch (e) {
+      return dim(` · not saved (${(e as Error).message})`);
+    }
+  };
+
+  // Re-evaluated per keypress render — memoized so typing costs nothing. The
+  // budget keys the cache too, so a zoom/resize rebuilds instead of serving a
+  // status fitted to the previous width.
+  let statusCache = { at: 0, s: "", frame: false, budget: 0 };
   const statusFor = (inFrame = false): string => {
+    const budget = inFrame ? frameWidth() - 6 : Math.max(16, (process.stdout.columns ?? 80) - 3);
     const now = performance.now();
-    if (now - statusCache.at > 1000 || statusCache.frame !== inFrame) {
-      statusCache = { at: now, s: buildStatus(inFrame), frame: inFrame };
+    if (now - statusCache.at > 1000 || statusCache.frame !== inFrame || statusCache.budget !== budget) {
+      statusCache = { at: now, s: buildStatus(inFrame, budget), frame: inFrame, budget };
     }
     return statusCache.s;
+  };
+
+  /** Publish this process's state so a SEPARATE `ap watch` can render it —
+   *  subagents/tasks/flows live in this process's memory and are otherwise
+   *  invisible from another terminal. Throttled and best-effort inside. */
+  // Background shell processes come from a JSONL file; re-reading it on every
+  // tool event would be wasteful, so memoize for a couple of seconds.
+  let procCache: { at: number; rows: import("./live.ts").LiveProc[] } = { at: 0, rows: [] };
+  const bgProcs = (): import("./live.ts").LiveProc[] => {
+    const now = Date.now();
+    if (now - procCache.at < 2000) return procCache.rows;
+    let rows: import("./live.ts").LiveProc[] = [];
+    try {
+      const { listBackground } = require("./bg.ts") as typeof import("./bg.ts");
+      rows = listBackground(config).slice(0, 8)
+        .map((p) => ({ pid: p.pid, cmd: p.cmd, log: p.log, alive: p.alive, bytes: p.bytes }));
+    } catch {}
+    procCache = { at: now, rows };
+    return rows;
+  };
+
+  const publishStatus = (busy: boolean, force = false) => {
+    if (config.light) return;
+    try {
+      const usd = pricing && (spend.prompt || spend.completion)
+        ? ((spend.prompt - spend.cached) * pricing.input +
+            spend.cached * (pricing.cacheRead ?? pricing.input) +
+            spend.completion * pricing.output) / 1e6
+        : undefined;
+      publishLive(config.dataDir, {
+        cwd: config.cwd,
+        session: session.id,
+        model: `${provider.name}/${provider.model}`,
+        busy,
+        ctxPct: lastCtxPct,
+        usd,
+        flow: activeFlow ?? undefined,
+        agents: listSubagents().slice(-12).map((s) => ({
+          id: s.id, label: s.task, status: s.status, steps: s.steps,
+          startedAt: s.startedAt, background: s.background,
+          fullTask: s.fullTask, result: s.result, live: s.live,
+        })),
+        procs: bgProcs(),
+      }, force);
+    } catch {}
   };
 
   /** One keypress from `keys` (Enter/Esc/ctrl+c → the last key = the safe no). */
@@ -479,17 +599,49 @@ export async function replMain(flags: CliFlags) {
       process.stdout.write(dim("\n[turn aborted]\n"));
     }
   };
-  // During a turn (readLine not active) handle ctrl+o / ctrl+c ourselves.
+  /** Open the interactive viewer in this terminal (alternate screen), then
+   *  restore whatever was on screen. Works mid-turn too — the turn keeps
+   *  running underneath, which is the point. */
+  let watching = false;
+  /** Turn output produced while the viewer is up, replayed on return. */
+  let held = "";
+  const openWatch = async () => {
+    if (watching || config.light || !process.stdout.isTTY) return;
+    const wasBusy = !!ctrl;
+    try {
+      spinner.stop(); // its 80ms timer would scribble over the viewer
+      publishStatus(!!ctrl, true); // make our own row fresh before drawing
+      watching = true; // from here on, turn output is held, not written
+      const { runWatch } = await import("./watch.ts");
+      await runWatch({ dataDir: config.dataDir });
+    } catch (e) {
+      console.log(dim(`watch failed: ${(e as Error).message}`));
+    } finally {
+      watching = false;
+      // Replay what the turn produced while we were away — the alternate
+      // screen discarded nothing because nothing was written to it.
+      if (held) { process.stdout.write(held); held = ""; }
+      if (ctrl) spinner.start("thinking"); // the turn is still running
+    }
+  };
+
+  // During a turn (readLine not active) handle ctrl+g / ctrl+o / ctrl+c here.
   process.stdin.on("keypress", (_s, key) => {
     if (!key?.ctrl || !ctrl) return;
+    // ctrl+G opens the viewer. NOT ctrl+W: Windows Terminal binds that to
+    // close-pane by default, so the keypress never reaches us — it is kept
+    // only as an alias for terminals that do deliver it.
+    if (key.name === "g" || key.name === "w") { void openWatch(); return; }
     if (key.name === "o") toggleVerbose(false);
     else if (key.name === "c") abortTurn();
   });
 
   const exit = (code = 0): never => {
+    clearLive(config.dataDir); // stop advertising this process to `ap watch`
     console.log(dim(`\nsession ${session.id} — resume with: ap --resume ${session.id}`));
     process.exit(code);
   };
+  process.once("exit", () => clearLive(config.dataDir));
 
   for (;;) {
     // Framed input: top edge (with the mode as its label), a left edge on the
@@ -517,8 +669,17 @@ export async function replMain(flags: CliFlags) {
       },
       onCtrlO: () => toggleVerbose(true),
       // readLine owns the frame: it redraws the top edge on every render, so
-      // the box survives resizes, wrapped input, and ctrl+o replays.
-      frameTop: framed ? () => edge(frameTop(frameWidth(), config.mode)) : undefined,
+      // the box survives resizes, wrapped input, and ctrl+o replays. The mode
+      // label carries its own color (plan = warn, code = accent) via painted
+      // pieces — never a wrapper around the whole line (ANSI nesting rule).
+      frameTop: framed
+        ? () => frameTop(
+            frameWidth(),
+            config.mode === "plan" ? "▲ plan" : "◆ code",
+            edge,
+            config.mode === "plan" ? yellow : cyan,
+          )
+        : undefined,
       status: config.light ? undefined : () => (framed ? frameBottom(frameWidth(), statusFor(true), edge) : `  ${statusFor()}`),
     }));
     // Submitting erases the live status row (it is the bottom edge), so close
@@ -589,41 +750,47 @@ export async function replMain(flags: CliFlags) {
         }
         case "model": {
           const arg = rest[0];
-          if (!arg) { console.log(dim(`model: ${provider.name}/${provider.model}`)); continue; }
+          if (!arg) {
+            // Interactive: providers from models.dev + config, key prompt if
+            // missing, then that provider's models. Full profile + TTY only —
+            // --light keeps the old one-line answer (frozen surface).
+            if (config.light || !process.stdout.isTTY) {
+              console.log(dim(`model: ${provider.name}/${provider.model}${config.light ? "" : " — /model <provider>/<model> to switch"}`));
+              continue;
+            }
+            try {
+              const { pickModelInteractive } = await import("./picker.ts");
+              const next = await pickModelInteractive(config, provider);
+              if (next) {
+                provider = next;
+                console.log(dim(`provider → ${next.name} (${next.baseUrl}), model → ${next.model}${rememberModel(next.name, next.model)}`));
+              } else {
+                console.log(dim(`model: ${provider.name}/${provider.model} (unchanged)`));
+              }
+            } catch (e) { console.log(dim((e as Error).message)); }
+            continue;
+          }
           const slash = arg.indexOf("/");
           if (slash === -1) {
             provider = { ...provider, model: arg };
-            console.log(dim(`model → ${provider.model}`));
+            console.log(dim(`model → ${provider.model}${rememberModel(provider.name, provider.model)}`));
             continue;
           }
           const pfx = arg.slice(0, slash);
           const modelId = arg.slice(slash + 1);
           if (pfx === provider.name) {
             provider = { ...provider, model: modelId };
-            console.log(dim(`model → ${provider.model}`));
+            console.log(dim(`model → ${provider.model}${rememberModel(provider.name, provider.model)}`));
           } else if (config.providers[pfx]) {
             try {
               provider = resolveProvider(config, { provider: pfx, model: modelId } as CliFlags);
-              console.log(dim(`provider → ${pfx}, model → ${modelId}`));
+              console.log(dim(`provider → ${pfx}, model → ${modelId}${rememberModel(pfx, modelId)}`));
             } catch (e) { console.log(dim((e as Error).message)); }
           } else {
             try {
-              const { loadCatalog, providerBaseUrl, envKeyFor } = await import("./models.ts");
-              const { getKey } = await import("./creds.ts");
-              const catalog = await loadCatalog(config.dataDir);
-              const cp = catalog[pfx];
-              const baseUrl = cp && providerBaseUrl(cp);
-              if (!cp || !baseUrl) {
-                console.log(dim(`unknown provider "${pfx}" — try /models ${pfx}`));
-                continue;
-              }
-              const key = envKeyFor(cp) ?? getKey(config.dataDir, pfx);
-              if (!key) {
-                console.log(dim(`no key for ${pfx} — run: ap auth ${pfx}  (env: ${cp.env?.join("/") ?? "none listed"})`));
-                continue;
-              }
-              provider = { name: pfx, baseUrl, apiKey: key, model: modelId, cacheControl: false, headers: {} };
-              console.log(dim(`provider → ${pfx} via models.dev (${baseUrl}), model → ${modelId}`));
+              const { resolveCatalogProvider } = await import("./models.ts");
+              provider = await resolveCatalogProvider(config, pfx, modelId);
+              console.log(dim(`provider → ${pfx} via models.dev/config (${provider.baseUrl}), model → ${modelId}${rememberModel(pfx, modelId)}`));
             } catch (e) { console.log(dim((e as Error).message)); }
           }
           continue;
@@ -683,18 +850,10 @@ export async function replMain(flags: CliFlags) {
           continue;
         }
         case "models": {
-          try {
-            const { loadCatalog, searchModels } = await import("./models.ts");
-            const catalog = await loadCatalog(config.dataDir);
-            const rows = searchModels(catalog, rest.join(" "));
-            if (!rows.length) { console.log(dim("no matches")); continue; }
-            for (const r of rows) {
-              const cost = r.inCost != null ? `$${r.inCost}/$${r.outCost ?? "?"}` : "";
-              const ctx = r.ctx ? `${Math.round(r.ctx / 1000)}k` : "";
-              console.log(`  ${r.provider}/${r.model} ${dim([ctx, cost].filter(Boolean).join(" · "))}`);
-            }
-            console.log(dim(`switch with /model <provider>/<model>`));
-          } catch (e) { console.log(dim((e as Error).message)); }
+          // Merged into /model: the picker IS the catalog search (type to
+          // filter). Kept as a redirect so muscle memory doesn't send
+          // "/models foo" to the model as prompt text.
+          console.log(dim(`/models was merged into /model — it opens a filterable provider → model picker (ap models <query> still works from the shell)`));
           continue;
         }
         case "mode": case "plan": case "code": {
@@ -733,6 +892,71 @@ export async function replMain(flags: CliFlags) {
           if (lastUsage) {
             console.log(dim(`last turn (provider-reported): ${lastUsage.prompt} prompt${lastUsage.cached ? ` (${lastUsage.cached} cached)` : ""} · ${lastUsage.completion} completion`));
           }
+          continue;
+        }
+        case "flow": {
+          if (config.light) { console.log(dim("workflows are not available in --light")); continue; }
+          const name = rest[0];
+          if (!name) {
+            console.log(dim("usage: /flow <name> [args…] — scripts live in .ap/workflows/<name>.ts"));
+            continue;
+          }
+          try {
+            const { runFlow } = await import("./flow.ts");
+            activeFlow = name;
+            publishStatus(true, true);
+            const result = await runFlow(config, name, rest.slice(1), (line) => {
+              console.log(dim(`  ${line}`));
+              publishStatus(true);
+            });
+            if (result !== undefined) {
+              console.log(typeof result === "string" ? result : JSON.stringify(result, null, 2));
+            }
+            console.log(dim(`flow ${name} finished`));
+          } catch (e) { console.log(red(`flow failed: ${(e as Error).message}`)); }
+          finally { activeFlow = null; publishStatus(false, true); }
+          continue;
+        }
+        case "watch": {
+          await openWatch();
+          continue;
+        }
+        case "artifacts": {
+          if (config.light) { console.log(dim("artifacts are not available in --light")); continue; }
+          try {
+            const { readdirSync, statSync } = await import("node:fs");
+            const dir = join(config.dataDir, "artifacts");
+            const files = readdirSync(dir).filter((f) => f.endsWith(".html"))
+              .map((f) => ({ f, m: statSync(join(dir, f)).mtimeMs }))
+              .sort((a, b) => b.m - a.m).slice(0, 20);
+            if (!files.length) { console.log(dim("no artifacts yet — the artifact tool writes them")); continue; }
+            for (const { f, m } of files) {
+              console.log(`  ${cyan(f)} ${dim(new Date(m).toLocaleString())}`);
+            }
+            console.log(dim(`open: ${join(dir, files[0]!.f)}`));
+          } catch { console.log(dim("no artifacts yet — the artifact tool writes them")); }
+          continue;
+        }
+        case "tasks": {
+          const { listTasks, taskById } = await import("./tasks.ts");
+          const sub = rest[0]?.toLowerCase();
+          if (sub === "kill") {
+            const t = taskById(Number(rest[1]));
+            if (!t) { console.log(dim(`no task #${rest[1] ?? "?"} — /tasks to list`)); continue; }
+            if (t.status !== "running") { console.log(dim(`task #${t.id} already ${t.status}`)); continue; }
+            t.ctrl.abort();
+            console.log(dim(`task #${t.id} kill requested`));
+            continue;
+          }
+          const all = listTasks();
+          if (!all.length) { console.log(dim("no background tasks this session — agent {background:true} starts one")); continue; }
+          for (const t of all) {
+            const secs = (((t.endedAt ?? Date.now()) - t.startedAt) / 1000).toFixed(1);
+            const mark = t.status === "running" ? yellow("●") : t.status === "done" ? green("✓") : red("✗");
+            console.log(`${mark} #${t.id} ${dim(`[${t.status}]`)} ${t.task} ${dim(`· ${t.steps} steps · ${secs}s`)}`);
+            if (t.result && t.status !== "done") console.log(dim(`    ${t.result.split("\n")[0]?.slice(0, 100)}`));
+          }
+          console.log(dim(`/tasks kill <id> stops one · results fold into your next message`));
           continue;
         }
         case "agents": {
@@ -949,6 +1173,9 @@ export async function replMain(flags: CliFlags) {
 
     let userText = input;
 
+    // Background-task results queued since the last turn are folded into this
+    // user message (the loop.ts pending pattern): the model learns outcomes
+    // the next time it runs, never mid-turn, and history stays append-only.
     // @file mentions: inline referenced files so the model skips a read turn.
     if (!config.light && /@[\w./\\-]+/.test(userText)) {
       const attached: string[] = [];
@@ -966,6 +1193,19 @@ export async function replMain(flags: CliFlags) {
         } catch {}
       }
       if (attached.length) process.stdout.write(dim(`[attached: ${attached.join(", ")}]\n`));
+    }
+
+    // Background-task results are folded in AFTER @file expansion, never
+    // before: subagent text is model output, and an "@../../secret" inside it
+    // would otherwise be expanded into context as if the USER had typed it.
+    // Only what the user typed drives @-expansion.
+    if (!config.light) {
+      const { drainTaskNotes } = await import("./tasks.ts");
+      const taskNotes = drainTaskNotes();
+      if (taskNotes.length) {
+        userText = `${taskNotes.map((n) => `<task-result>\n${n}\n</task-result>`).join("\n")}\n\n${userText}`;
+        console.log(dim(`  folded ${taskNotes.length} background task result(s) into this turn`));
+      }
     }
 
     if (planArmed && lastPlan && config.mode === "code") {
@@ -1066,7 +1306,12 @@ export async function replMain(flags: CliFlags) {
       compactBuf += compactChunk;
       const live = verbose ? fullChunk : compactChunk;
       if (live) {
-        process.stdout.write(live);
+        // While the viewer owns the screen, HOLD output instead of writing it:
+        // a write would land on the alternate screen buffer (corrupting the
+        // viewer and making it flicker) and then be lost on exit. Held text is
+        // flushed verbatim when the viewer closes, so the transcript is whole.
+        if (watching) held += live;
+        else process.stdout.write(live);
         printedBuf += live;
       }
 
@@ -1077,9 +1322,19 @@ export async function replMain(flags: CliFlags) {
 
       if (e.type === "tool_start" || e.type === "tool_end") spinner.start(spinnerLabel());
       else if (e.type === "text" && planMode && fullR.planTruncated) spinner.start("writing plan…");
+
+      // Keep the pinned bar and the cross-process snapshot current as work
+      // happens — subagent starts/ends are exactly what the user watches for.
+      if (e.type === "tool_start" || e.type === "tool_end" || e.type === "subline") publishStatus(true);
     };
 
     spinner.start("thinking");
+    // Pin the status to the bottom for the whole turn: output scrolls above
+    // it, so the model/ctx/cost/agents line never scrolls out of sight.
+    publishStatus(true, true);
+    // Heartbeat: long model thinking emits no tool events, so without this the
+    // snapshot goes stale and `ap watch` shows "17s ago" on a working process.
+    const beat = setInterval(() => publishStatus(true, true), 1000);
     if (process.stdin.isTTY) process.stdin.setRawMode(true);
     let finalText = "";
     try {
@@ -1092,6 +1347,8 @@ export async function replMain(flags: CliFlags) {
       // error already emitted
     } finally {
       spinner.stop();
+      clearInterval(beat);
+      publishStatus(false, true);
       ctrl = null;
       turnT0 = 0;
       // Resolve pricing for the current model in the background (disk-cached

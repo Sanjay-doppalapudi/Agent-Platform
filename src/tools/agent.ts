@@ -1,8 +1,12 @@
 // Subagent tool: delegates a task to a child `ap run --json --light` process.
 // Children are always the light profile, so they cannot spawn further agents
 // (structural recursion cap). Zero deps — we spawn our own binary.
-import { existsSync } from "node:fs";
+// background:true detaches the child from the turn: it keeps running after
+// the tool returns, and its result reaches the model as a note folded into
+// the next user message (tasks.ts).
 import { ensureAllowed, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
+import { runSubagent } from "./subagent.ts";
+import { auditTask, finishTask, registerTask } from "../tasks.ts";
 import type { ToolCtx } from "./index.ts";
 
 export interface SubagentInfo {
@@ -12,6 +16,22 @@ export interface SubagentInfo {
   steps: number;
   startedAt: number;
   endedAt?: number;
+  background?: boolean;
+  /** Full task text and final output, so /watch can show what a subagent
+   *  actually did instead of only that it ran. Capped — this is mirrored into
+   *  the cross-process snapshot on every heartbeat. */
+  fullTask?: string;
+  result?: string;
+  /** Tail of the subagent's live reasoning/text while it runs, so /watch can
+   *  show its thinking instead of a black box. Bounded — tail only. */
+  live?: string;
+}
+
+/** Keep only the last N chars, so a chatty subagent cannot grow memory. */
+const LIVE_CAP = 8000;
+function appendLive(info: SubagentInfo, delta: string): void {
+  const next = (info.live ?? "") + delta;
+  info.live = next.length > LIVE_CAP ? next.slice(next.length - LIVE_CAP) : next;
 }
 
 const registry: SubagentInfo[] = [];
@@ -21,20 +41,28 @@ export function listSubagents(): SubagentInfo[] {
   return registry;
 }
 
-/** How to re-invoke ourselves: compiled exe vs `bun src/index.ts`.
- * Compiled binaries embed the entry at a VIRTUAL path — "/$bunfs/…" on
- * unix, "B:\~BUN\…" on Windows — so the reliable test is: does the entry
- * exist on disk? If not, we're compiled and the exe alone re-runs itself. */
-function selfCmd(): string[] {
-  const entry = process.argv[1] ?? "";
-  if (!entry || entry.includes("$bunfs") || entry.includes("~BUN") || !existsSync(entry)) {
-    return [process.execPath];
+/** Validate a named profile HERE so a typo fails fast with the valid list
+ *  instead of dying inside the child process. */
+async function profileArgsFor(name: string | undefined, ctx: ToolCtx): Promise<string[]> {
+  if (!name) return [];
+  const { discoverAgents } = await import("../agents.ts");
+  const defs = discoverAgents(ctx.config);
+  const def = defs.find((a) => a.name === String(name).toLowerCase());
+  if (!def) {
+    // "name" is a PROFILE (.ap/agents/<name>.md), not a free-form role. Models
+    // routinely invent one ("websearch", "analyze") and then retry the same
+    // call forever, so say what to do instead of just what was wrong.
+    throw new ToolError(
+      defs.length
+        ? `unknown agent profile "${name}" — available: ${defs.map((a) => a.name).join(", ")}. Omit "name" to run a plain subagent.`
+        : `no agent profiles are defined, so "name" cannot be used. Drop the "name" argument and put the role in the task itself (e.g. task: "search the web for X and summarize"). Profiles are files: .ap/agents/<name>.md`,
+    );
   }
-  return [process.execPath, entry];
+  return ["--agent", def.name];
 }
 
 export async function agentTool(
-  args: { task: string; name?: string; cwd?: string; timeout?: number },
+  args: { task: string; name?: string; cwd?: string; timeout?: number; background?: boolean },
   ctx: ToolCtx,
 ): Promise<string> {
   if (typeof args.task !== "string" || !args.task.trim()) {
@@ -46,105 +74,83 @@ export async function agentTool(
   // parent's permission rules gone. Gate it like any other outside access.
   if (args.cwd) await ensureAllowed(cwd, ctx, "delegate a subagent outside the workspace");
   const timeoutMs = Math.min((args.timeout ?? 300) * 1000, 900_000);
+  const extraArgs = await profileArgsFor(args.name, ctx);
+  const label = `${args.name ? `[${args.name}] ` : ""}${args.task.replace(/\s+/g, " ")}`.slice(0, 100);
 
-  // Named profile: validated HERE so a typo fails fast with the valid list
-  // instead of dying inside the child process.
-  let profileArgs: string[] = [];
-  if (args.name) {
-    const { discoverAgents } = await import("../agents.ts");
-    const defs = discoverAgents(ctx.config);
-    const def = defs.find((a) => a.name === String(args.name).toLowerCase());
-    if (!def) {
-      throw new ToolError(
-        `unknown agent profile "${args.name}" — available: ${defs.map((a) => a.name).join(", ") || "(none defined)"}`,
-      );
-    }
-    profileArgs = ["--agent", def.name];
+  if (args.background) {
+    // Detached: the task gets its OWN abort controller — the turn's ctrl+c
+    // must not kill it — and reports back via the next-turn note queue.
+    const t = registerTask(label, timeoutMs);
+    const info: SubagentInfo = {
+      id: nextId++, task: label, status: "running", steps: 0,
+      startedAt: t.startedAt, background: true, fullTask: args.task.slice(0, 2000),
+    };
+    registry.push(info);
+    auditTask(ctx.config, t, "start");
+    ctx.subline?.(`◇ task #${t.id} started in background: ${label.slice(0, 70)}`);
+    void runSubagent({
+      task: args.task, cwd, timeoutMs, extraArgs,
+      signal: t.ctrl.signal,
+      onStep: () => { t.steps++; info.steps++; },
+      onOutput: (_kind, delta) => appendLive(info, delta),
+    }).then((r) => {
+      const failed = r.killed || (!r.text && (r.errorMsg || r.exitCode !== 0));
+      const status = r.killed ? "killed" : failed ? "error" : "done";
+      const result = r.killed
+        ? "killed (timeout or /tasks kill)"
+        : failed
+          ? truncateMiddle(r.errorMsg || r.stderrTail.trim() || `exit code ${r.exitCode}, no output`, 600)
+          : truncateMiddle(r.text || "(subagent produced no output)", 20_000);
+      finishTask(t, status, result);
+      info.status = status;
+      info.result = result.slice(0, 4000);
+      info.endedAt = t.endedAt;
+      auditTask(ctx.config, t, "end");
+    }).catch((e) => {
+      finishTask(t, "error", String((e as Error).message ?? e));
+      info.status = "error";
+      info.result = String((e as Error).message ?? e).slice(0, 4000);
+      info.endedAt = Date.now();
+      auditTask(ctx.config, t, "end");
+    });
+    return `started background task #${t.id} — the result will arrive with the next turn (/tasks to inspect)`;
   }
 
   const info: SubagentInfo = {
-    id: nextId++,
-    task: `${args.name ? `[${args.name}] ` : ""}${args.task.replace(/\s+/g, " ")}`.slice(0, 100),
-    status: "running",
-    steps: 0,
-    startedAt: Date.now(),
+    id: nextId++, task: label, status: "running", steps: 0, startedAt: Date.now(),
+    fullTask: args.task.slice(0, 2000),
   };
   registry.push(info);
   ctx.subline?.(`◇ agent #${info.id} started: ${info.task.slice(0, 70)}`);
 
-  const proc = Bun.spawn(
-    [...selfCmd(), "run", "-p", args.task, "--json", "--light", "--cwd", cwd, ...profileArgs],
-    { stdout: "pipe", stderr: "pipe", stdin: "ignore", windowsHide: true } as any,
-  );
-  // Child stderr is the only place startup-phase crashes surface — keep a tail.
-  let stderrTail = "";
-  const stderrDone = (async () => {
-    try {
-      for await (const chunk of proc.stderr as any) {
-        stderrTail = (stderrTail + new TextDecoder().decode(chunk)).slice(-1000);
-      }
-    } catch {}
-  })();
-
-  let killed = false;
-  const timer = setTimeout(() => { killed = true; proc.kill(); }, timeoutMs);
-  const onAbort = () => { killed = true; proc.kill(); };
-  ctx.signal.addEventListener("abort", onAbort, { once: true });
-
-  let finalText = "";
-  let errorMsg = "";
-  try {
-    const reader = proc.stdout.getReader();
-    const decoder = new TextDecoder();
-    let buf = "";
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let nl: number;
-      while ((nl = buf.indexOf("\n")) !== -1) {
-        const line = buf.slice(0, nl).trim();
-        buf = buf.slice(nl + 1);
-        if (!line) continue;
-        try {
-          const e = JSON.parse(line);
-          if (e.type === "tool_end") {
-            info.steps++;
-            ctx.subline?.(`  ↳ ${e.error ? "✗" : "✓"} ${e.name} · ${e.ms}ms`);
-          } else if (e.type === "done") {
-            finalText = e.text ?? "";
-          } else if (e.type === "error" && !e.retryable) {
-            errorMsg = e.message ?? "";
-          }
-        } catch {}
-      }
-    }
-    await proc.exited;
-    await stderrDone;
-  } finally {
-    clearTimeout(timer);
-    ctx.signal.removeEventListener("abort", onAbort);
-  }
+  const r = await runSubagent({
+    task: args.task, cwd, timeoutMs, extraArgs,
+    signal: ctx.signal,
+    onStep: (line) => { info.steps++; ctx.subline?.(line); },
+    onOutput: (_kind, delta) => appendLive(info, delta),
+  });
 
   info.endedAt = Date.now();
   const secs = ((info.endedAt - info.startedAt) / 1000).toFixed(1);
-  if (killed) {
+  if (r.killed) {
     info.status = "killed";
+    info.result = `killed or timed out after ${secs}s`;
     ctx.subline?.(`◇ agent #${info.id} killed after ${secs}s`);
     throw new ToolError(`subagent #${info.id} timed out or was aborted after ${secs}s`);
   }
   // A child that produced no final text failed, whatever the exit code says —
   // surface every clue we have (error event, stderr tail, exit code).
-  if (!finalText) {
-    const code = proc.exitCode;
-    const clue = errorMsg || stderrTail.trim() || `exit code ${code}, no output`;
-    if (errorMsg || code !== 0) {
+  if (!r.text) {
+    const clue = r.errorMsg || r.stderrTail.trim() || `exit code ${r.exitCode}, no output`;
+    if (r.errorMsg || r.exitCode !== 0) {
       info.status = "error";
+      info.result = truncateMiddle(clue, 2000);
       ctx.subline?.(`◇ agent #${info.id} failed after ${secs}s`);
       throw new ToolError(`subagent #${info.id} failed: ${truncateMiddle(clue, 600)}`);
     }
   }
   info.status = "done";
+  info.result = truncateMiddle(r.text || "(subagent produced no output)", 4000);
   ctx.subline?.(`◇ agent #${info.id} done · ${info.steps} steps · ${secs}s`);
-  return truncateMiddle(finalText || "(subagent produced no output)", 20_000);
+  return truncateMiddle(r.text || "(subagent produced no output)", 20_000);
 }

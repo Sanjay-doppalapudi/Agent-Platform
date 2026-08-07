@@ -85,6 +85,14 @@ ap help <command>       # detailed help (run · loop · skills · mcp · acp · 
 
 Common flags: `--provider <name>` · `-m/--model <id>` · `--cwd <dir>` · `--mode plan|code` (`--plan`) · `--session <id>` · `-c/--continue` · `--base-url <url> --api-key <key>` for any ad-hoc endpoint.
 
+Optional router policies keep the normal provider path intact while selecting explicit targets and falling back only on transient failures before output:
+
+```json
+"router": { "targets": ["opencode-go/minimax-m3", "openrouter/anthropic/claude-sonnet-4.5"], "fallback": true }
+```
+
+Targets use each provider's endpoint from models.dev unless `providers` config overrides it. Credentials stay separate per provider via `ap auth <provider>` (or the provider's env var), and new models.dev providers/models can be selected without adding a provider block. Authentication and model errors never fall through. Only OpenAI Chat Completions-compatible providers auto-route; add custom protocol support explicitly if needed.
+
 ### REPL
 
 Type `/` to open the command menu (↑/↓ navigate, Enter/Tab select, Esc close; ↑/↓ recall history otherwise):
@@ -92,12 +100,12 @@ Type `/` to open the command menu (↑/↓ navigate, Enter/Tab select, Esc close
 | Command | Effect |
 |---|---|
 | `/plan` / `/code` | switch mode — plan is structurally read-only (only read/glob/grep schemas are sent) and produces an implementation plan; code (default) has all tools. The prompt shows the active mode: `plan › ` / `code › ` |
-| `/model <id>` | switch model; `/model <provider>/<model>` switches provider too — unknown providers are resolved live from models.dev |
+| `/model` | interactive picker: every provider (models.dev + config, with key status) → that provider's models with context/pricing; type to filter, and it prompts for a missing key. `/model <provider>/<model>` still switches directly |
 | `/theme [name]` | list themes with color swatches, or switch — `default` · `mono` · `nord` · `dracula` · `gruvbox` · `solarized` · `matrix`. The choice is saved to `<dataDir>/config.json`; `NO_COLOR` forces mono |
 | `/effort minimal\|low\|medium\|high\|off` | reasoning effort, sent as `reasoning_effort` (aliases `max`/`min`/`med` accepted; config default: `reasoningEffort`); checks models.dev whether the model supports reasoning and warns if not — shown on the status line |
-| `/models <query>` | search the models.dev catalog |
 | `/new` `/resume <id>` `/sessions` | session management |
 | `/undo` `/diff [n]` `/checkpoints` `/restore <hash>` | shadow-git checkpoint ops (see below) |
+| `/tasks [kill <id>]` `/flow <name>` `/artifacts` | background tasks · run a workflow · list generated artifacts |
 | `/worktree` `/compact` `/agents` | worktree per task · summarize into fresh session · list subagents |
 | `/mcp` `/skills` `/sandbox` | MCP server status · installed skills · sandbox state/toggle |
 | `/system` `/context` | inspect the system prompt / token usage |
@@ -170,7 +178,9 @@ Weaker-model tolerance: tool names (`search`→grep, `create`→write, …) and 
 ## Full-profile features (absent in `--light`)
 
 - **Checkpoints**: every mutating turn auto-commits the workspace to a shadow git repo (your real git history is untouched; works in non-git folders). `/undo`, `/diff [n]`, `/checkpoints`, `/restore <hash>`.
-- **Subagents**: the `agent` tool delegates independent subtasks to parallel child processes (`ap run --light` under the hood — children can't recurse). Live nested `↳` progress lines stream in, and `/agents` lists every subagent with status, steps, and duration.
+- **Subagents**: the `agent` tool delegates independent subtasks to parallel child processes (`ap run --light` under the hood — children can't recurse). Live nested `↳` progress lines stream in, and `/agents` lists every subagent with status, steps, and duration. Add `"background": true` to **detach** the task: the tool returns immediately, the subagent runs on, and its result is folded into your next message as a `<task-result>` note. `/tasks` lists them (with per-task steps/duration), `/tasks kill <id>` stops one; an audit trail lands in `<dataDir>/tasks.jsonl`.
+- **Dynamic workflows**: write a `.ap/workflows/<name>.ts` that `export default async function ({ agent, parallel, log, args })` — deterministic control flow (loops, conditionals, fan-out) around bounded `agent()` calls, each a light subagent. Pass a JSON schema (`agent(task, { schema })`) to force validated JSON with an automatic one-shot retry. Run it with `ap flow <name> [args…]` (progress → stderr, result → stdout, so it pipes) or `/flow <name>` in the REPL. A model can't launch a flow — you do; concurrency is capped and a 50-agent ceiling backstops runaways.
+- **Artifacts**: the `artifact` tool writes a self-contained HTML page (report, diagram, dashboard) to `<dataDir>/artifacts/` with a no-network CSP baked in, so a generated page can't phone home. `/artifacts` lists recent ones; `ap serve` exposes them at `GET /artifacts/<file>.html`.
 - **Named agents** (opencode-style): drop `.ap/agents/<name>.md` (frontmatter `description` / `model` / `tools`; body = role instructions) — `.claude/agents/` works too. The model delegates with `{"name": "reviewer", "task": …}` (profiles are listed in the system prompt, one line each), `ap run --agent <name> -p …` runs one headlessly, and a profile's `tools:` list becomes a hard schema whitelist for that agent (e.g. a read-only reviewer literally cannot write).
 - **Custom slash commands**: drop `.ap/commands/<name>.md` in a repo (or `<dataDir>/commands/`) — `/name args` expands the file as your message with `$ARGS` substitution; appears in the `/` menu automatically.
 - **`@file` mentions**: `@src/foo.ts` in a message inlines the file (8KB cap) — saves the model a read turn.

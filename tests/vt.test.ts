@@ -172,3 +172,60 @@ describe("framed input rendering", () => {
     expect(screen.some((r) => r.startsWith("╭─"))).toBe(false);
   });
 });
+
+describe("zoomed-in terminals (REGRESSION: fixed width floors wrapped the box)", () => {
+  test("a 24-column terminal renders one intact box — no row wraps", async () => {
+    const { screen } = await drive({ cols: 24, framed: true, keys: ["h", "i"] });
+    for (const row of screen) expect(row.length).toBeLessThanOrEqual(24);
+    expect(screen.filter((r) => r.includes("› ")).length).toBe(1);
+    expect(screen.filter((r) => r.startsWith("╭")).length).toBe(1);
+  });
+
+  test("even 16 columns stays unwrapped (frameWidth has no floor above the terminal)", async () => {
+    const { screen } = await drive({ cols: 16, framed: true, keys: ["h"] });
+    for (const row of screen) expect(row.length).toBeLessThanOrEqual(16);
+    expect(screen.filter((r) => r.includes("› ")).length).toBe(1);
+  });
+
+  test("zooming mid-edit redraws the frame at the new width without a keypress", async () => {
+    const vt = new VT(60);
+    const realWrite = process.stdout.write.bind(process.stdout);
+    const realCols = process.stdout.columns;
+    (process.stdout as any).write = (s: any) => { vt.write(String(s)); return true; };
+    Object.defineProperty(process.stdout, "columns", { value: 60, configurable: true });
+    emitKeypressEvents(process.stdin);
+    try {
+      // Width read live per render — frameWidth() must NOT be captured once.
+      const p = readLine({
+        prompt: "│ › ",
+        commands: [],
+        history: [],
+        frameTop: () => frameTop((Math.max(process.stdout.columns ?? 80, 8)) - 1, "code"),
+        status: () => frameBottom((Math.max(process.stdout.columns ?? 80, 8)) - 1, "model · ctx 4%", (s) => s),
+      });
+      process.stdin.emit("keypress", "h", { name: "h", sequence: "h" });
+
+      // Zoom in: shrink to 36 columns and fire a BURST of resize events (a
+      // real zoom gesture fires one per step) — no further keypress. The
+      // debounce coalesces the burst into one redraw; wait past it.
+      for (const c of [52, 44, 36]) {
+        Object.defineProperty(process.stdout, "columns", { value: c, configurable: true });
+        (process.stdout as any).emit("resize");
+      }
+      await new Promise((r) => setTimeout(r, 80));
+
+      const screen = vt.screen();
+      const tops = screen.filter((r) => r.startsWith("╭"));
+      expect(tops.length).toBe(1); // redrawn, not duplicated
+      expect(tops[0]!.length).toBeLessThanOrEqual(36); // at the NEW width
+      expect(screen.filter((r) => r.includes("› ")).length).toBe(1);
+
+      process.stdin.emit("keypress", "\x03", { name: "c", ctrl: true });
+      process.stdin.emit("keypress", "\x03", { name: "c", ctrl: true });
+      await p;
+    } finally {
+      (process.stdout as any).write = realWrite;
+      Object.defineProperty(process.stdout, "columns", { value: realCols, configurable: true });
+    }
+  });
+});

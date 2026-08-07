@@ -28,7 +28,8 @@ export function toolLabel(name: string, args: any): string {
     case "bash": return `bash ${trunc(String(a.cmd ?? "").replace(/\s+/g, " "), 70)}${a.background ? " &" : ""}`;
     case "glob": return `glob ${a.pattern ?? ""}`;
     case "grep": return `grep ${trunc(String(a.pattern ?? ""), 40)}${a.glob ? ` (${a.glob})` : ""}${a.mode && a.mode !== "content" ? ` [${a.mode}]` : ""}`;
-    case "agent": return `◇ agent ${trunc(String(a.task ?? "").replace(/\s+/g, " "), 60)}`;
+    case "agent": return `◇ agent${a.background ? " &" : ""} ${trunc(String(a.task ?? "").replace(/\s+/g, " "), 60)}`;
+    case "artifact": return `artifact ${trunc(String(a.title ?? ""), 50)}`;
     case "fetch": return `fetch ${trunc(String(a.url ?? ""), 60)}`;
     case "todo": return "todo";
     default: return `${name} ${trunc(JSON.stringify(a), 60)}`;
@@ -53,10 +54,17 @@ export function toolSummary(name: string, output: string, error?: boolean): stri
       if (first.startsWith("started background")) return trunc(first.replace("started background process ", ""), 60);
       return output === "(no output)" ? "ok" : `${lineCount(output)} lines out`;
     }
-    case "agent": return `${lineCount(output)} lines back`;
+    case "agent": return output.startsWith("started background task") ? trunc(output.split("\n")[0]!, 60) : `${lineCount(output)} lines back`;
+    case "artifact": return trunc(output.split("\n")[0]?.replace("artifact saved: ", "") ?? "", 70);
     case "fetch": return `${Math.round(Buffer.byteLength(output, "utf8") / 1024)}KB`;
     case "todo": return trunc(output.split("\n")[0] ?? "", 40);
-    default: return "";
+    // MCP and other dynamic tools have no bespoke summary — an empty string
+    // rendered as a stray "· ·" gap, so fall back to a generic shape hint.
+    default: {
+      if (!output || output === "(no output)") return "ok";
+      const lines = lineCount(output);
+      return lines > 1 ? `${lines} lines` : trunc(output.split("\n")[0] ?? "", 60);
+    }
   }
 }
 
@@ -74,7 +82,7 @@ const ERROR_HINTS: [RegExp, string][] = [
   [/blocked by upstream|autherror|revoked|insufficient[_ ]quota|billing|credit/i,
     "fix: the provider REJECTED this key (revoked, out of credits, or account blocked) — get a fresh key; if it comes from an env var, update that (env wins over `ap auth`). Run: ap doctor"],
   // Model errors first: some providers wrap them in a 401/403 status.
-  [/model\b.*(not (found|supported|available)|does not exist|unknown|invalid)/i, "fix: /models <query> to find a valid id, then /model <provider>/<model>"],
+  [/model\b.*(not (found|supported|available)|does not exist|unknown|invalid)/i, "fix: /model opens a filterable provider → model picker — or /model <provider>/<model> directly"],
   [/\b401\b|unauthorized|invalid[_ ]?api[_ ]?key|incorrect api key/i, "fix: the key is missing or wrong — ap auth <provider>"],
   [/\b403\b|forbidden/i, "fix: this key can't use that model — /models <query> to find one it can"],
   [/\b429\b|rate[- ]?limit|quota/i, "note: rate-limited — retries are automatic; a cheaper model (-m) also helps"],

@@ -3,6 +3,7 @@
 // stops calling tools.
 import type { Config, ResolvedProvider } from "./config.ts";
 import { ProviderError, streamChat, type Msg } from "./provider.ts";
+import { streamRouted } from "./router.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import type { Session } from "./session.ts";
 import { autoDenyPermit, execTool, getTool, isParallelSafe, permissionFor, resolveToolName, toolSchemasFor, type PermitFn } from "./tools/index.ts";
@@ -109,7 +110,7 @@ export interface RunOptions {
 /** Run one user turn to completion. Returns the final assistant text. */
 export async function runTurn(
   config: Config,
-  provider: ResolvedProvider,
+  provider: ResolvedProvider | ResolvedProvider[],
   session: Session,
   userText: string,
   emit: Emit,
@@ -130,16 +131,28 @@ export async function runTurn(
 
     let res;
     try {
-      res = await streamChat(
-        provider,
-        msgs,
-        toolSchemasFor(config),
-        (delta) => emit({ type: "text", delta }),
-        signal,
-        opts.extra,
-        (delta) => emit({ type: "reasoning", delta }),
-        config.streamIdleSeconds * 1000,
-      );
+      res = Array.isArray(provider)
+        ? await streamRouted(
+          provider,
+          config.router?.fallback ?? true,
+          msgs,
+          toolSchemasFor(config),
+          (delta) => emit({ type: "text", delta }),
+          signal,
+          opts.extra,
+          (delta) => emit({ type: "reasoning", delta }),
+          config.streamIdleSeconds * 1000,
+        )
+        : await streamChat(
+          provider,
+          msgs,
+          toolSchemasFor(config),
+          (delta) => emit({ type: "text", delta }),
+          signal,
+          opts.extra,
+          (delta) => emit({ type: "reasoning", delta }),
+          config.streamIdleSeconds * 1000,
+        );
     } catch (e) {
       const pe = e as ProviderError;
       // Mid-stream failures are safe to retry whole: tools only run after

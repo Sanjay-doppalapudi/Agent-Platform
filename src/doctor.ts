@@ -6,6 +6,7 @@
 import { accessSync, constants, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { resolveProvider, type Config, type ResolvedProvider } from "./config.ts";
+import { resolveCatalogProvider } from "./models.ts";
 
 export type CheckState = "ok" | "warn" | "fail";
 
@@ -157,7 +158,22 @@ function checkWorkspace(config: Config): Check {
 async function checkAuth(config: Config): Promise<Check> {
   let provider: ResolvedProvider;
   try {
-    provider = resolveProvider(config, {} as any);
+    if (config.router?.targets?.length) {
+      const [target] = config.router.targets;
+      const slash = target!.indexOf("/");
+      provider = await resolveCatalogProvider(
+        config,
+        slash === -1 ? target! : target!.slice(0, slash),
+        slash === -1 ? undefined : target!.slice(slash + 1),
+      );
+    } else {
+      const active = process.env.HARNESS_PROVIDER || config.provider;
+      if (!config.providers[active]) {
+        provider = await resolveCatalogProvider(config, active, undefined);
+      } else {
+        provider = resolveProvider(config, {} as any);
+      }
+    }
   } catch (e) {
     return fail("auth", (e as Error).message, "fix the provider/key checks above first");
   }

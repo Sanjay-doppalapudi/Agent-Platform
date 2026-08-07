@@ -30,9 +30,15 @@ export interface McpServerSpec {
 
 export type PermissionVerdict = "allow" | "ask" | "deny";
 
+export interface RouterPolicy {
+  targets: string[];
+  fallback?: boolean;
+}
+
 export interface Config {
   provider: string;
   providers: Record<string, ProviderEntry>;
+  router?: RouterPolicy;
   mode: "plan" | "code";
   permissions: "yolo" | "prompt";
   /** Per-tool rules (opencode-style), evaluated before the permissions mode:

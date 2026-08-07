@@ -1,5 +1,9 @@
 {
   "provider": "opencode-go",
+  "router": {
+    "targets": ["opencode-go/minimax-m3", "openrouter/anthropic/claude-sonnet-4.5"],
+    "fallback": true
+  },
   "providers": {
     "opencode-go": {
       "baseUrl": "https://opencode.ai/zen/go/v1",

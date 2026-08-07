@@ -4,6 +4,49 @@ import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statS
 import { join } from "node:path";
 import type { Msg } from "./provider.ts";
 
+/**
+ * Guarantee every stored tool_call carries a valid stringified JSON OBJECT.
+ *
+ * A model that emits malformed arguments (e.g. `{"path":"x", " "content":…`)
+ * used to poison the session permanently: the tool itself failed cleanly, but
+ * the raw string was persisted and re-sent on every later request, and
+ * providers reject the entire conversation with HTTP 400 ("tool arguments
+ * must be a stringified JSON object"). One bad call ended the session — and
+ * survived /resume, because it was on disk.
+ *
+ * Repairs are attempted first (parseArgsLenient handles fences, smart quotes,
+ * trailing commas, double-encoding); a hopeless value becomes "{}" so the
+ * assistant/tool pairing stays intact and the tool-result message is what
+ * tells the model its call was malformed. Well-formed calls are left byte-
+ * identical. Returns true when anything was changed.
+ */
+export function sanitizeToolCallArgs(msg: Msg): boolean {
+  const calls = (msg as any)?.tool_calls;
+  if (!Array.isArray(calls)) return false;
+  let changed = false;
+  for (const tc of calls) {
+    const fn = tc?.function;
+    if (!fn) continue;
+    const raw = fn.arguments;
+    if (typeof raw === "string") {
+      try {
+        const v = JSON.parse(raw);
+        if (v !== null && typeof v === "object" && !Array.isArray(v)) continue; // already a JSON object
+      } catch {}
+    }
+    let repaired = "{}";
+    try {
+      // Lazy require: session.ts is on the startup path, tools/index.ts is not.
+      const { parseArgsLenient } = require("./tools/index.ts") as typeof import("./tools/index.ts");
+      const v = parseArgsLenient(typeof raw === "string" ? raw : JSON.stringify(raw ?? {}));
+      if (v !== null && typeof v === "object" && !Array.isArray(v)) repaired = JSON.stringify(v);
+    } catch {}
+    fn.arguments = repaired;
+    changed = true;
+  }
+  return changed;
+}
+
 export interface SessionMeta {
   cwd: string;
   model: string;
@@ -27,6 +70,7 @@ export class Session {
   ) {}
 
   append(msg: Msg) {
+    sanitizeToolCallArgs(msg);
     this.history.push(msg);
     // A torn tail must be terminated in the SAME write, otherwise this record
     // concatenates onto the fragment and both become one unparsable line —
@@ -65,6 +109,13 @@ export class Session {
         const obj = JSON.parse(line);
         if (obj.t === "msg") {
           const { t, ...msg } = obj;
+          // Heal sessions written before the sanitizer existed: a stored
+          // tool_call whose arguments are not valid JSON is re-sent verbatim
+          // and the provider rejects the WHOLE request (HTTP 400
+          // "tool arguments must be a stringified JSON object"), so such a
+          // session could never take another turn. Repair in memory only —
+          // load must not write (list()/latest() rank by mtime).
+          if (sanitizeToolCallArgs(msg as Msg)) s.recovered = true;
           s.history.push(msg as Msg);
         } else if (obj.t === "meta") {
           const { t, ...meta } = obj;

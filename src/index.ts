@@ -186,6 +186,8 @@ Usage:
   ap                       interactive REPL in the current directory
   ap run -p "task"         one-shot run (--json for NDJSON events)
   ap loop -p "goal"        loop work→verify until the goal is verifiably done
+  ap flow <name> [args…]   run a workflow script (.ap/workflows/<name>.ts)
+  ap watch                 live view of running ap sessions, agents and flows
   ap serve [--port 4141]   HTTP server mode (sessions + SSE)
   ap acp                   ACP agent for editors (Zed): stdio, modes, permissions
   ap skills [add|remove]   list/install SKILL.md packs (skills.sh compatible)
@@ -264,6 +266,55 @@ switch (cmd) {
     const { loopMain } = await import("./loop.ts");
     await loopMain(flags);
     break;
+  }
+  case "watch": {
+    // Live view of every ap process publishing status (subagents, background
+    // tasks, flows). Repaints in place; ctrl+c quits. Read-only — it never
+    // touches another process, only the snapshots they publish.
+    const { loadConfig } = await import("./config.ts");
+    const config = loadConfig(flags);
+    const { readLive, formatSnapshot } = await import("./live.ts");
+    // --once (or a pipe) prints a plain snapshot; a TTY gets the interactive
+    // viewer with arrow-key navigation, same as /watch inside the REPL.
+    if (rest.includes("--once") || !process.stdout.isTTY) {
+      const snaps = readLive(config.dataDir);
+      const now = Date.now();
+      process.stdout.write(
+        `\x1b[2map watch · ${snaps.length} process(es)\x1b[0m\n\n` +
+        (snaps.length
+          ? snaps.map((s) => formatSnapshot(s, now).join("\n")).join("\n\n")
+          : "no live ap processes.\nstart one in another terminal — subagents, background tasks and flows appear here.") +
+        "\n",
+      );
+      process.exit(0);
+    }
+    const { emitKeypressEvents } = await import("node:readline");
+    emitKeypressEvents(process.stdin);
+    const { runWatch } = await import("./watch.ts");
+    await runWatch({ dataDir: config.dataDir });
+    process.exit(0);
+  }
+  case "flow": {
+    // ap flow <name|path> [args…] — progress → stderr, result → stdout, so
+    // `ap flow x | jq` works. Exit 1 on any throw.
+    const { loadConfig } = await import("./config.ts");
+    const config = loadConfig(flags);
+    const name = rest[0];
+    if (!name) {
+      console.error("usage: ap flow <name|path.ts> [args…]   (looks in .ap/workflows/ then <dataDir>/workflows/)");
+      process.exit(1);
+    }
+    const { runFlow } = await import("./flow.ts");
+    try {
+      const result = await runFlow(config, name, rest.slice(1), (line) => process.stderr.write(`\x1b[2m${line}\x1b[0m\n`));
+      if (result !== undefined) {
+        process.stdout.write((typeof result === "string" ? result : JSON.stringify(result, null, 2)) + "\n");
+      }
+      process.exit(0);
+    } catch (e) {
+      console.error(`flow failed: ${(e as Error).message}`);
+      process.exit(1);
+    }
   }
   case "skills": {
     const { loadConfig } = await import("./config.ts");

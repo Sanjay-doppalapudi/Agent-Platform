@@ -1,6 +1,6 @@
 // Themes + input frame geometry (pure string work — no terminal needed).
 import { describe, expect, test } from "bun:test";
-import { currentTheme, cursorGeometry, EFFORT_LEVELS, frameBottom, frameTop, frameWidth, paint, parseEffort, setTheme, THEMES, themeNames } from "../src/theme.ts";
+import { currentTheme, cursorGeometry, EFFORT_LEVELS, fitSegments, frameBottom, frameTop, frameWidth, paint, parseEffort, reflowRewind, setTheme, THEMES, themeNames } from "../src/theme.ts";
 import { MdRenderer } from "../src/md.ts";
 
 describe("markdown nesting (regression)", () => {
@@ -150,8 +150,9 @@ describe("themes", () => {
 });
 
 describe("frameWidth", () => {
-  test("clamps absurd terminal sizes", () => {
-    expect(frameWidth(10)).toBe(28);
+  test("never exceeds the real terminal width (REGRESSION: the old floor of 28 wrapped every frame row on zoomed-in terminals)", () => {
+    expect(frameWidth(10)).toBe(9); // was 28 — wider than the terminal itself
+    expect(frameWidth(24)).toBe(23);
     expect(frameWidth(400)).toBe(160);
     expect(frameWidth(80)).toBe(79);
   });
@@ -168,6 +169,61 @@ describe("frameTop", () => {
     const t = frameTop(10, "a-very-long-mode-name");
     expect(visible(t).length).toBe(10);
     expect(t).toBe("╭────────╮");
+  });
+  test("painted pieces: label color stays inside the label, border pieces are painted separately", () => {
+    const border = (s: string) => `<B>${s}</B>`;
+    const label = (s: string) => `<L>${s}</L>`;
+    const t = frameTop(40, "◆ code", border, label);
+    expect(t).toBe(`<B>╭─ </B><L>◆ code</L><B> ${"─".repeat(29)}╮</B>`);
+  });
+});
+
+describe("reflowRewind", () => {
+  // The multiplying-box bug: after a zoom, the terminal REWRAPS previously
+  // drawn rows, so the rewind distance must be recomputed from content
+  // lengths at the new width — stale row counts land mid-block.
+  test("no reflow needed: wide terminal, one row above", () => {
+    expect(reflowRewind([59], 5, 80)).toBe(1);
+  });
+  test("shrunk terminal: the 59-char top edge now occupies two rows", () => {
+    expect(reflowRewind([59], 5, 36)).toBe(2);
+  });
+  test("deferred wrap: an exactly-cols line is still ONE row", () => {
+    expect(reflowRewind([36], 5, 36)).toBe(1);
+  });
+  test("cursor line itself wraps too", () => {
+    expect(reflowRewind([59], 40, 36)).toBe(3); // top→2 rows + 1 wrapped input row
+  });
+  test("nothing above, short cursor line → no rewind", () => {
+    expect(reflowRewind([], 10, 36)).toBe(0);
+  });
+  test("multiple lines above (picker block)", () => {
+    // title 30, filter 10, three items 20 each at 25 cols: 30→2 rows, rest 1 each.
+    expect(reflowRewind([30, 10, 20, 20], 20, 25)).toBe(5);
+  });
+});
+
+describe("fitSegments", () => {
+  const seg = (text: string, prio: number) => ({ text, prio });
+  test("everything fits → everything stays, in display order", () => {
+    expect(fitSegments([seg("a", 0), seg("b", 3), seg("c", 0)], 80, " · ")).toBe("a · b · c");
+  });
+  test("under pressure the highest prio drops first", () => {
+    const s = [seg("model", 0), seg("effort high", 3), seg("ctx 4%", 0), seg("~$0.03", 4)];
+    expect(fitSegments(s, 100, " · ")).toBe("model · effort high · ctx 4% · ~$0.03");
+    expect(fitSegments(s, 30, " · ")).toBe("model · effort high · ctx 4%"); // cost (prio 4) dropped
+    expect(fitSegments(s, 20, " · ")).toBe("model · ctx 4%"); // then effort (prio 3)
+  });
+  test("ties drop the rightmost segment first", () => {
+    const s = [seg("left", 2), seg("mid", 0), seg("right", 2)];
+    expect(fitSegments(s, 11, " · ")).toBe("left · mid");
+  });
+  test("prio-0 segments never drop, even when still over budget", () => {
+    expect(fitSegments([seg("a-long-model-name", 0), seg("ctx 4%", 0)], 5, " · ")).toBe("a-long-model-name · ctx 4%");
+  });
+  test("ANSI codes are invisible to the width math", () => {
+    const s = [seg("\x1b[2mmodel\x1b[0m", 0), seg("\x1b[33mctx 90%\x1b[0m", 0), seg("\x1b[2m~$1\x1b[0m", 4)];
+    expect(fitSegments(s, 14, " · ")).toBe("\x1b[2mmodel\x1b[0m · \x1b[33mctx 90%\x1b[0m");
   });
 });
 

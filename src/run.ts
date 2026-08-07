@@ -1,6 +1,7 @@
 // One-shot headless mode: `ap run -p "task" [--json]`
 // --json → one AgentEvent per line (NDJSON) on stdout.
 import { loadConfig, resolveProvider } from "./config.ts";
+import { routeTargets } from "./router.ts";
 import { lifecycleSettled, runTurn, type AgentEvent } from "./agent.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import { Checkpoints } from "./checkpoint.ts";
@@ -47,10 +48,12 @@ export async function runMain(flags: CliFlags) {
     }
   }
 
-  const provider = resolveProvider(config, flags);
+  const provider = config.router?.targets?.length
+    ? await routeTargets(config, flags)
+    : resolveProvider(config, flags);
   const session = flags.session
     ? Session.load(config.dataDir, flags.session)
-    : Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
+    : Session.create(config.dataDir, { cwd: config.cwd, model: Array.isArray(provider) ? provider[0]!.model : provider.model, at: new Date().toISOString() });
   config.sessionId = session.id;
 
   const json = !!flags.json;
@@ -131,6 +134,11 @@ export async function runMain(flags: CliFlags) {
       }
     }
     if (!json) process.stdout.write("\n");
+    // Background tasks are part of the run's work, and process.exit would
+    // kill their children on Windows — wait like lifecycleSettled does, then
+    // REPORT their results: a one-shot run has no next turn to fold notes
+    // into, so anything not surfaced here is silently lost work.
+    await settleAndReportTasks(json);
     await lifecycleSettled();
     // A cancelled run is not a successful run — CI and wrapper scripts read
     // this exit code (130 = terminated by SIGINT, per shell convention).
@@ -138,7 +146,26 @@ export async function runMain(flags: CliFlags) {
   } catch (e) {
     if (!json) console.error(`\nfailed: ${(e as Error).message}`);
     else process.stdout.write(JSON.stringify({ type: "error", message: (e as Error).message, retryable: false }) + "\n");
+    // The failure path must settle too — otherwise process.exit(1) kills
+    // background children on Windows and their work vanishes unreported.
+    await settleAndReportTasks(json);
     await lifecycleSettled();
     process.exit(1);
   }
+}
+
+/** Wait for background tasks, then print what they produced (NDJSON event in
+ *  --json mode, dim text otherwise). Never throws. */
+async function settleAndReportTasks(json: boolean): Promise<void> {
+  try {
+    const { tasksRunning, settleTasks, drainTaskNotes } = await import("./tasks.ts");
+    if (tasksRunning()) {
+      if (!json) process.stderr.write("\x1b[2mwaiting for background tasks…\x1b[0m\n");
+      await settleTasks();
+    }
+    for (const note of drainTaskNotes()) {
+      if (json) process.stdout.write(JSON.stringify({ type: "task_result", text: note }) + "\n");
+      else process.stderr.write(`\x1b[2m${note}\x1b[0m\n`);
+    }
+  } catch {}
 }

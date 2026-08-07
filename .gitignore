@@ -5,6 +5,14 @@ harness.exe.old*
 dist/
 harness.config.json
 *.log
-ap.exe
-ap.exe.old*
+
+# Compiled binary and every aside-renamed variant. Windows cannot overwrite a
+# RUNNING exe, and Smart App Control can block a freshly built one, so builds
+# leave copies like ap.exe.old-<stamp> / ap.exe.blocked-by-sac behind.
+ap.exe*
+
+# Local machine config and scratch
 ap.config.json
+.commandcode/
+.DS_Store
+Thumbs.db

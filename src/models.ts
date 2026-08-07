@@ -3,6 +3,8 @@
 // startup hot path.
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import type { Config, ResolvedProvider } from "./config.ts";
+import { getKey } from "./creds.ts";
 
 const CATALOG_URL = "https://models.dev/api.json";
 const TTL_MS = 24 * 60 * 60 * 1000;
@@ -141,4 +143,57 @@ export function envKeyFor(prov: CatalogProvider): string | undefined {
     if (v) return v;
   }
   return undefined;
+}
+
+/**
+ * Key resolution for a provider, in the exact order resolveCatalogProvider
+ * applies: HARNESS_API_KEY > config apiKey > config apiKeyEnv > models.dev
+ * env vars > credential store. Exported so the /model picker's "key set"
+ * badge can never disagree with what resolution will actually do — pass the
+ * same `cp` (or undefined) the resolver would use.
+ */
+export function catalogKeyFor(config: Config, providerId: string, cp?: CatalogProvider): string | undefined {
+  const entry = config.providers[providerId];
+  return process.env.HARNESS_API_KEY ?? entry?.apiKey ??
+    (entry?.apiKeyEnv ? process.env[entry.apiKeyEnv] : undefined) ??
+    (cp ? envKeyFor(cp) : undefined) ??
+    getKey(config.dataDir, providerId);
+}
+
+/** Resolve a catalog or configured provider into the shared execution shape. */
+export async function resolveCatalogProvider(
+  config: Config,
+  providerId: string,
+  modelId?: string,
+): Promise<ResolvedProvider> {
+  const entry = config.providers[providerId];
+  let catalog: Catalog | null = null;
+  let cp: CatalogProvider | undefined;
+  if (!entry?.baseUrl) {
+    catalog = await loadCatalog(config.dataDir);
+    cp = catalog[providerId];
+  }
+  const baseUrl = entry?.baseUrl?.replace(/\/+$/, "") ?? (cp ? providerBaseUrl(cp) : null);
+  if (!baseUrl) {
+    throw new Error(`provider "${providerId}" is not configured or listed by models.dev — use ap models ${providerId} or add a providers entry`);
+  }
+  const apiKey = catalogKeyFor(config, providerId, cp) ?? "";
+  if (!apiKey) {
+    const envs = cp?.env?.join("/") ?? entry?.apiKeyEnv;
+    throw new Error(`no API key for provider "${providerId}" — run: ap auth ${providerId}${envs ? `  (or set ${envs})` : ""}`);
+  }
+  const models = Object.keys(cp?.models ?? {});
+  const model = modelId ?? entry?.model ?? (models.length === 1 ? models[0] : undefined);
+  if (!model) {
+    const count = models.length;
+    throw new Error(`choose a model for "${providerId}" — ${count} catalog models available; run: ap models ${providerId}`);
+  }
+  return {
+    name: providerId,
+    baseUrl,
+    apiKey,
+    model,
+    cacheControl: entry?.cacheControl ?? false,
+    headers: entry?.headers ?? {},
+  };
 }

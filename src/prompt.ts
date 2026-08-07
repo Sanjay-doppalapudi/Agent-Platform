@@ -98,7 +98,9 @@ Rules:
 
   if (!config.light) {
     prompt += `
-- Use the agent tool to delegate independent subtasks in parallel; use todo to track multi-step work; use websearch to find web pages and fetch to read them (render:true if a page needs JavaScript).`;
+- Use the agent tool to delegate independent subtasks in parallel (background:true returns immediately and reports back on a later turn); use todo to track multi-step work; use websearch to find web pages and fetch to read them (render:true if a page needs JavaScript). Answer questions about current events by searching, never from memory.
+- Use the artifact tool when the user wants a report, dashboard or diagram to look at: it saves one self-contained HTML page (inline CSS/JS only — remote resources are blocked).
+- "Workflow" means an AP workflow, not a script in another language: write .ap/workflows/<name>.ts exporting \`export default async function ({ agent, parallel, log, args }) { … }\`, where agent(task, {schema?}) runs a subagent and parallel([...thunks]) runs them concurrently. The user runs it with \`ap flow <name>\` or /flow. Never hand-roll a runner in Python/Node for this.`;
   }
 
   if (config.mode === "plan") {

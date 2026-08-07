@@ -8,7 +8,8 @@
 //   GET  /session/:id/events                    → SSE scoped to one session
 //   GET  /session/:id/messages                  → Msg[]
 //   DELETE /session/:id
-import { loadConfig, resolveProvider } from "./config.ts";
+import { loadConfig, resolveProvider, type ResolvedProvider } from "./config.ts";
+import { routeTargets } from "./router.ts";
 import { initMcp } from "./mcp.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
 import { Session } from "./session.ts";
@@ -26,7 +27,10 @@ interface Live {
 
 export async function serveMain(flags: CliFlags) {
   const baseConfig = loadConfig(flags);
-  const provider = resolveProvider(baseConfig, flags);
+  const provider: ResolvedProvider | ResolvedProvider[] = baseConfig.router?.targets?.length
+    ? await routeTargets(baseConfig, flags)
+    : resolveProvider(baseConfig, flags);
+  const primary = Array.isArray(provider) ? provider[0]! : provider;
   const port = flags.port ?? 4141;
 
   // MCP binds to the server's base cwd once per process; per-session cwds
@@ -82,16 +86,30 @@ export async function serveMain(flags: CliFlags) {
       const path = url.pathname;
 
       if (req.method === "GET" && path === "/health") {
-        return json({ ok: true, version: VERSION, provider: provider.name, model: provider.model });
+        return json({ ok: true, version: VERSION, provider: primary.name, model: primary.model, targets: Array.isArray(provider) ? provider.map((p) => `${p.name}/${p.model}`) : undefined });
       }
       if (req.method === "GET" && path === "/event") return sse(null);
+
+      // Generated artifacts (artifact tool). Filename alphabet is validated
+      // AND the resolved path is containment-checked — model-influenced names
+      // never traverse (the skills installer taught us this lesson).
+      const am = path.match(/^\/artifacts\/([A-Za-z0-9][A-Za-z0-9.-]*\.html)$/);
+      if (req.method === "GET" && am) {
+        const { join, resolve } = await import("node:path");
+        const dir = resolve(baseConfig.dataDir, "artifacts");
+        const file = resolve(join(dir, am[1]!));
+        if (!file.startsWith(dir)) return json({ error: "not found" }, 404);
+        const f = Bun.file(file);
+        if (!(await f.exists())) return json({ error: "not found" }, 404);
+        return new Response(f, { headers: { "content-type": "text/html; charset=utf-8" } });
+      }
 
       if (req.method === "POST" && path === "/session") {
         const body = (await req.json().catch(() => ({}))) as { cwd?: string; title?: string };
         const cwd = body.cwd ?? baseConfig.cwd;
         const session = Session.create(baseConfig.dataDir, {
           cwd,
-          model: provider.model,
+          model: primary.model,
           at: new Date().toISOString(),
         });
         sessions.set(session.id, { session, cwd, chain: Promise.resolve() });
@@ -145,7 +163,9 @@ export async function serveMain(flags: CliFlags) {
 
           const config = { ...baseConfig, cwd: live.cwd, sessionId: id };
           if (config.permissions === "prompt") config.permissions = "yolo"; // interactive-only
-          const prov = body.model ? { ...provider, model: body.model } : provider;
+          const prov = Array.isArray(provider)
+            ? (body.model ? provider.map((p) => ({ ...p, model: body.model! })) : provider)
+            : (body.model ? { ...provider, model: body.model } : provider);
           const extra = body.response_format ? { response_format: body.response_format } : undefined;
           const permit = body.allowOutside ? async () => true : undefined; // undefined → auto-deny
 
@@ -175,5 +195,5 @@ export async function serveMain(flags: CliFlags) {
     },
   });
 
-  console.log(`AP serving on http://localhost:${server.port} · ${provider.name}/${provider.model}`);
+  console.log(`AP serving on http://localhost:${server.port} · ${primary.name}/${primary.model}`);
 }

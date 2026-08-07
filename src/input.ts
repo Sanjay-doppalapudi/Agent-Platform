@@ -4,7 +4,7 @@
 // ↑/↓ recall history when no menu is open.
 // Caller must have run readline.emitKeypressEvents(process.stdin) once.
 
-import { currentTheme, cursorGeometry } from "./theme.ts";
+import { currentTheme, cursorGeometry, reflowRewind, visibleLen } from "./theme.ts";
 
 const R = "\x1b[0m";
 const DIM = () => currentTheme().dim; // theme-aware (mono/NO_COLOR → no codes)
@@ -125,19 +125,29 @@ export function readLine(opts: {
     // before erasing — without it, a wrapped input leaves its first row
     // stranded and the whole block marches one row down per keystroke.
     let drawnAbove = 0;
+    // What the last render actually drew, for the resize path: the terminal
+    // REFLOWS these rows at the new width, so the rewind there must be
+    // recomputed from content lengths, not taken from stale drawnAbove.
+    let lastTopLen = 0;
+    let lastInputLen = 0;
 
     const rewind = () => `${drawnAbove ? `\x1b[${drawnAbove}A` : ""}\r\x1b[J`;
 
-    const render = () => {
-      const cols = Math.max(process.stdout.columns ?? 80, 20);
+    const render = (rewindStr?: string) => {
+      // Honest width: never pretend the terminal is wider than it is — a
+      // floor above the real column count makes every drawn row wrap and
+      // shreds the box when the user zooms in. 8 only guards degenerate PTYs.
+      const cols = Math.max(process.stdout.columns ?? 80, 8);
       const top = opts.frameTop?.();
       const { rows: inputRows, col } = cursorGeometry(promptLen + buf.length, cols);
 
       // Redraw the frame top every time: that makes the box resize-correct and
       // self-healing after anything above erases it (e.g. the ctrl+o replay).
-      let out = rewind();
+      let out = rewindStr ?? rewind();
       if (top) out += `${top}\n`;
       out += `${prompt}${buf}`;
+      lastTopLen = top ? visibleLen(top) : 0;
+      lastInputLen = promptLen + buf.length;
 
       let below = 0; // rows drawn BELOW the input's last row
       const menu = activeMenu();
@@ -177,10 +187,29 @@ export function readLine(opts: {
 
     const done = (result: string | null) => {
       stdin.removeListener("keypress", onKey);
+      process.stdout.removeListener("resize", onResize);
+      if (resizeTimer) clearTimeout(resizeTimer);
       const top = opts.frameTop?.();
       process.stdout.write(`${rewind()}${top ? `${top}\n` : ""}${prompt}${result ?? ""}\n`);
       drawnAbove = 0;
       resolve(result);
+    };
+
+    // Zoom/resize: redraw at the new width without waiting for a keypress.
+    // The terminal has REFLOWED our old rows, so the rewind is recomputed
+    // from the recorded content lengths (reflowRewind), never from stale
+    // drawnAbove — that mismatch is what multiplied the frame top on every
+    // zoom step. Debounced: a zoom gesture fires a burst of resize events,
+    // and one redraw at the final size beats ten flickering intermediates.
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    const onResize = () => {
+      if (resizeTimer) clearTimeout(resizeTimer);
+      resizeTimer = setTimeout(() => {
+        resizeTimer = undefined;
+        const cols = Math.max(process.stdout.columns ?? 80, 8);
+        const up = Math.min(reflowRewind(lastTopLen ? [lastTopLen] : [], lastInputLen, cols), 400);
+        render(`${up ? `\x1b[${up}A` : ""}\r\x1b[J`);
+      }, 40);
     };
 
     const pick = (menu: { start: number; items: MenuItem[] }, viaEnter: boolean) => {
@@ -253,6 +282,7 @@ export function readLine(opts: {
     };
 
     stdin.on("keypress", onKey);
+    process.stdout.on("resize", onResize);
     render();
   });
 }

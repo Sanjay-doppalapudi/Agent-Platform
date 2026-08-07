@@ -53,7 +53,7 @@ describe("searchModels", () => {
 
 describe("errorHint", () => {
   test("model errors outrank auth errors (401-wrapped model error)", () => {
-    expect(errorHint('HTTP 401: {"message":"Model x is not supported"}')).toContain("/models");
+    expect(errorHint('HTTP 401: {"message":"Model x is not supported"}')).toContain("/model");
   });
   test("plain 401 → auth hint", () => {
     expect(errorHint("HTTP 401 unauthorized")).toContain("ap auth");

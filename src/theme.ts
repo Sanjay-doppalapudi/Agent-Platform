@@ -108,12 +108,39 @@ export function paint(code: string, s: string): string {
 
 // --- input frame -----------------------------------------------------------
 
-/** Usable frame width: terminal columns, clamped to something sane. */
+/**
+ * Usable frame width: terminal columns minus a one-column safety margin,
+ * capped at 160. There is NO lower clamp above the terminal's real width —
+ * a floor (this used to be 28) draws lines wider than a zoomed-in terminal,
+ * and every frame row then wraps, shredding the box. Honest width always
+ * beats a pretty minimum.
+ */
 export function frameWidth(cols = process.stdout.columns ?? 80): number {
-  return Math.max(28, Math.min(cols - 1, 160));
+  return Math.max(4, Math.min(cols - 1, 160));
 }
 
 export const visibleLen = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "").length;
+
+/**
+ * Truncate to `width` VISIBLE characters, keeping ANSI sequences intact so a
+ * cut can never land inside an escape (which would leak raw bytes or a stuck
+ * colour). Shared by the live status line and the watch viewer.
+ */
+export function fitLine(s: string, width: number): string {
+  if (visibleLen(s) <= width) return s;
+  let out = "";
+  let seen = 0;
+  for (let i = 0; i < s.length && seen < width - 1; i++) {
+    const ch = s[i]!;
+    if (ch === "\x1b") {
+      const end = s.indexOf("m", i);
+      if (end !== -1) { out += s.slice(i, end + 1); i = end; continue; }
+    }
+    out += ch;
+    seen++;
+  }
+  return out + "…";
+}
 
 /**
  * Where the cursor ends up after printing `len` visible chars from column 0:
@@ -131,16 +158,71 @@ export function cursorGeometry(len: number, cols: number): { rows: number; col: 
 }
 
 /**
- * Top edge: `╭─ label ─────────╮`. Plain string — the caller paints it.
- * Label is dropped entirely when the terminal is too narrow to hold it.
+ * Physical rows from the top of a previously drawn block to the cursor AFTER
+ * the terminal REFLOWED it at `cols`. Windows Terminal (and iTerm etc.)
+ * rewrap existing rows on resize, so a rewind computed from the pre-resize
+ * geometry lands mid-block — each zoom step then paints a fresh frame top
+ * next to the stranded old one (the "multiplying box"). The fix: we know the
+ * visible length of every line we drew, so the post-reflow geometry is fully
+ * computable. `above` = visible lengths of the full lines above the cursor's
+ * line; `cursorLen` = characters before the cursor on its own logical line.
+ * Deferred wrap applies throughout (an exactly-cols line is still one row).
  */
-export function frameTop(width: number, label = ""): string {
+export function reflowRewind(above: number[], cursorLen: number, cols: number): number {
+  let rows = 0;
+  for (const len of above) rows += cursorGeometry(len, cols).rows + 1;
+  return rows + cursorGeometry(cursorLen, cols).rows;
+}
+
+/**
+ * Top edge: `╭─ label ─────────╮`. With no painters this returns a plain
+ * string (the caller may paint the whole line). With `border`/`labelPaint`
+ * the pieces are painted individually — same discipline as frameBottom, so a
+ * label color can never leak into the fill and a reset inside the label can
+ * never kill the border color. Label is dropped when the terminal is too
+ * narrow to hold it.
+ */
+export function frameTop(
+  width: number,
+  label = "",
+  border: (s: string) => string = (s) => s,
+  labelPaint?: (s: string) => string,
+): string {
   const w = Math.max(4, width);
-  if (label && w >= label.length + 8) {
-    const fill = "─".repeat(Math.max(1, w - label.length - 5));
-    return `╭─ ${label} ${fill}╮`;
+  const len = visibleLen(label);
+  if (label && w >= len + 8) {
+    const fill = "─".repeat(Math.max(1, w - len - 5));
+    return `${border("╭─ ")}${(labelPaint ?? border)(label)}${border(` ${fill}╮`)}`;
   }
-  return `╭${"─".repeat(w - 2)}╮`;
+  return border(`╭${"─".repeat(w - 2)}╮`);
+}
+
+export interface StatusSegment {
+  text: string;
+  /** Drop order under pressure: higher drops first; 0 never drops. */
+  prio: number;
+}
+
+/**
+ * Join status segments with `sep`, dropping the highest-prio segments
+ * (rightmost first on ties) until the visible length fits `budget`. Display
+ * order is preserved. Prio-0 segments survive even if the result still
+ * overflows — frameBottom's ANSI-safe truncation is the backstop.
+ */
+export function fitSegments(segments: StatusSegment[], budget: number, sep: string): string {
+  const alive = segments.slice();
+  const join = () => alive.map((s) => s.text).join(sep);
+  while (alive.length > 1 && visibleLen(join()) > budget) {
+    let worst = -1;
+    let worstPrio = 0;
+    for (let i = 0; i < alive.length; i++) {
+      const p = alive[i]!.prio;
+      if (p > 0 && p >= worstPrio) { worst = i; worstPrio = p; }
+    }
+    if (worst === -1) break;
+    alive.splice(worst, 1);
+  }
+  return join();
 }
 
 /**
