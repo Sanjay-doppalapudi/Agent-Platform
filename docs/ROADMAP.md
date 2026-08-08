@@ -1,22 +1,23 @@
 # AP feature roadmap — competitive survey & implementation report
 
-Generated 2026-08-01, status updated 2026-08-07. Sources surveyed: opencode, Claude Code, OpenAI Codex CLI, Cline, xAI Grok Build, Nous Hermes Agent, OpenClaw, tmux. Constraint for everything below: **zero or near-zero dependencies, nothing on the startup hot path, prompt-prefix byte-stability preserved, every feature gated off in `ap --light`.**
+Generated 2026-08-01, status updated 2026-08-08. Sources surveyed: opencode, Claude Code, OpenAI Codex CLI, Cline, xAI Grok Build, Nous Hermes Agent, OpenClaw, tmux. Constraint for everything below: **zero or near-zero dependencies, nothing on the startup hot path, prompt-prefix byte-stability preserved, every feature gated off in `ap --light`.**
 
-## Status (2026-08-07) — shipped since this survey
+## Status (2026-08-08) — shipped since this survey
 
 - **All of P0 and P1** (checkpoints/undo, subagents, custom commands, AGENTS.md, @file, tool hooks, /compact, session search, worktrees, fetch+todo tools, resume picker).
-- **Web**: `websearch` (DuckDuckGo scrape) + plain `fetch`; browser rendering is disabled until it can enforce the hostname policy across redirects.
-- **Loop mode** (`ap loop`): work→check→audit until verifiably done; stall detection, compaction, per-iteration diffs, LOOP_BLOCKED.
-- **Read-scoped sandbox**: reads outside the workspace permit-gated, AP-private data hard-denied, bash path scanning.
-- **Skills**: skills.sh / Claude Code SKILL.md packs, zero-dep GitHub installer (nested folders discovered).
+- **Web**: `websearch` (DuckDuckGo scrape) + plain `fetch` (SSRF hardening: metadata/link-local + IPv6-embedded; DNS pin + redirect re-check); browser rendering remains disabled.
+- **Loop mode** (`ap loop`): work→check→audit until verifiably done; stall detection, shared Compaction 2.0, per-iteration diffs, LOOP_BLOCKED.
+- **Read-scoped sandbox**: reads outside the workspace permit-gated, AP-private data hard-denied, bash path scanning; compound bash permission segments.
+- **Skills**: skills.sh / Claude Code SKILL.md packs, zero-dep GitHub installer (nested folders); `/skills reload`.
 - **MCP client** (was P2 → shipped): stdio + Streamable HTTP, Claude-Code-format config, dynamic tools frozen for cache stability, `ap mcp` CLI; `/mcp reload`, soft auto-background onto task queue.
-- **ACP adapter** (was P2 → shipped): `ap acp` for Zed — session modes, native permission dialogs, slash commands, session load, editor-MCP passthrough.
-- **Lifecycle hooks**: `hooks.onDone`/`onError` — shell command or webhook POST when a turn finishes; `preCompact`/`postCompact` too.
+- **ACP adapter** (was P2 → shipped): `ap acp` for Zed — session modes, native permission dialogs, slash commands (incl. `/commit`/`/pr`), session load, editor-MCP passthrough.
+- **Lifecycle hooks**: `hooks.onDone`/`onError` — shell command or webhook POST; `preCompact`/`postCompact`; afterEdit `AP_ARGS.paths`.
 - **Tier A (2026-08)**: repo-keyed memory, Compaction 2.0 (`/archives`, `/restore-context`, auto-memory), compound bash permissions, `repomap` tool, in-process agent channels.
-- **Tier B (2026-08)**: `/flow` list/last, `/thinking`, `/confirm edits`, `.ap/DECISIONS.md`, `/rewind`, `/commit --staged|--sign`, bracketed paste, afterEdit `AP_ARGS.paths`, richer Retry-After, REPL `/agent` profiles.
+- **Tier B (2026-08)**: `/flow` list/last, `/thinking`, `/confirm edits`, `.ap/DECISIONS.md`, `/rewind`, `/commit --staged|--sign`, bracketed paste, richer Retry-After, REPL `/agent` profiles, `/steer`.
 - **Git + tmux (2026-08)**: `git.autoBranch` on first mutation, `/pr` + `ap pr` (`gh pr create`), optional `ap tmux` / `/spawn` (unix; clear fallback on Windows).
+- **Windows tool fixes**: spawn `rg` via `Bun.which` absolute path; grep file-path targets must not use the file as spawn cwd.
 
-Remaining candidates: none from the original Tier A/B/remaining set — further work is polish and competitive catch-up only.
+Remaining candidates: none from the original Tier A/B/remaining set — further work is polish and competitive catch-up only. See [README.md](../README.md) for the user-facing feature list.
 
 ## The two-profile model (implemented)
 
@@ -75,40 +76,37 @@ Legend: **P0** build next · **P1** valuable, after P0 · **P2** someday · **Sk
 ### Skip (with reasons)
 
 - **Full-screen TUI with mouse** (Grok Build, opencode): alternate-screen buffers, layout engines, mouse protocols — this is where CLIs get heavy and where we deliberately went inline-scroll. Ctrl+O re-render already covers the main need.
-- **Messaging gateways / channels** (OpenClaw, Hermes): a different product category (personal assistant). AP is a repo tool.
+- **Messaging gateways / personal-assistant channels** (OpenClaw, Hermes): a different product category. AP ships an **in-process** agent channel bus for coordinating subagents/workflows inside one repo session — not a multi-surface gateway.
 - **Marketplaces / plugin SDKs**: ecosystem plays that need mass; file-based commands+hooks deliver the useful subset.
 - **OS-level sandboxing** (Codex Seatbelt/Landlock): the right way needs platform-native code (Windows has no Landlock equivalent accessible from Bun). Our jail+danger-block+permit model is the honest zero-dep ceiling; document Vercel Sandbox/Docker as the escalation path for untrusted work.
 - **Browser automation** (Cline): needs Playwright/CDP — heavyweight. The `fetch` tool covers read-only web needs.
 
-## 3. tmux — what it's for and how AP uses it
+## 3. tmux — shipped as an optional unix adapter
 
-tmux = terminal multiplexer: named **sessions** that survive disconnect (detach/attach), **windows/panes**, and a scripting surface (`new-session -d`, `send-keys`, `capture-pane`) that makes it an orchestration substrate.
+tmux = terminal multiplexer: named **sessions** that survive disconnect (detach/attach), **windows/panes**, and a scripting surface (`new-session -d`, `send-keys`, `capture-pane`).
 
-**Reality check for this machine:** tmux does not run on native Windows (WSL/MSYS2 only). So AP treats tmux as an *optional adapter*, detected via `Bun.which("tmux")`:
+**SHIPPED** (`src/tmux.ts`): detected via `Bun.which("tmux")` — never a hard dependency.
 
-1. **Parallel background agents** (the killer use): `/spawn <task>` →
-   `tmux new-session -d -s ap-<slug> 'ap run -p "<task>" --cwd <worktree>'` — the agent keeps running after you close the terminal; `tmux attach -t ap-<slug>` to watch live; `capture-pane -p` to pull output back into the parent session. Pairs perfectly with worktree-per-task (§4).
-2. **Layout bootstrap**: `ap tmux` opens a session with pane 1 = `ap`, pane 2 = dev server logs, pane 3 = shell.
-3. **Persistence**: long `ap run` jobs on a remote Linux box survive SSH drops.
+1. **Parallel background agents**: `/spawn <task>` → detached `ap run --json --light` in `tmux new-session -d -s ap-<slug>`; `tmux attach -t ap-<slug>` to watch; `/tmux capture <session>` pulls pane text.
+2. **Layout bootstrap**: `ap tmux` / `/tmux layout` opens panes for ap | shell | spare.
+3. **Persistence**: long `ap run` jobs on remote Linux survive SSH drops.
 
-**Windows-native fallback (already 80% built):** background `bash` tool (detached + log file) + `ap serve` sessions + `--resume` give the same survive-and-reattach properties; a `/ps` command listing background pids + tailing their logs closes the gap. Verdict: implement the fallback pieces first (they work everywhere), add the ~60-line tmux adapter for unix hosts.
+**Windows-native fallback (shipped):** background `bash` + `/ps` + worktrees + `--resume`. On native Windows, `ap tmux` / `/spawn` print a clear hint (use WSL or the fallback).
 
-## 4. Git workflows: worktrees, branches, checkpoints
+## 4. Git workflows: worktrees, branches, checkpoints — shipped
 
 Three layers, all pure `git` CLI, no libraries:
 
-1. **Checkpoint layer (safety, invisible)** — shadow repo per session (`--git-dir` under dataDir, work-tree = workspace). Auto-commit after each mutating turn: free unlimited `/undo`/`/diff`/`/restore` without polluting the user's history, works even in non-git folders. This is how Claude Code's rewind and Cline's checkpoints behave.
-2. **Branch layer (hygiene)** — config `git.autoBranch: true`: first mutation on a clean default branch → `git switch -c ap/<session-slug>` (never commit to main uninvited). `/commit` command: stage + commit with a model-drafted message shown for approval.
-3. **Worktree layer (parallelism)** — `/worktree <task>` creates `git worktree add <dir> -b ap/<slug>`; each subagent or tmux background agent gets its own worktree so parallel tasks never collide on the working tree; `/worktree merge` rebases/merges back and removes it. This is the pattern Claude Code power users run, and it composes with §3.1 into: *one command → isolated branch+worktree+background agent → review diff → merge*.
-
-PR flow: `gh pr create` via the bash tool already works today (user's gh is authed); a `/pr` command is a one-liner template over it.
+1. **Checkpoint layer (safety, invisible)** — shadow repo per session. Auto-commit after each mutating turn: `/undo`/`/diff`/`/restore` without polluting real history.
+2. **Branch layer (hygiene)** — `git.autoBranch: true`: first mutation on a protected branch → `git switch -c ap/<slug>`. `/commit [--staged|--sign]`: stage + commit with model-drafted message + approval. `/pr` + `ap pr`: `gh pr create` helper (never force-pushes; `--yes` required on CLI).
+3. **Worktree layer (parallelism)** — `/worktree new|list|back|merge` with `ap/<slug>` branches; pairs with tmux `/spawn` for isolated parallel agents.
 
 ## 5. Suggested build order
 
-1. ~~**P0 batch** (checkpoints+/undo, subagents, custom commands, AGENTS.md, @file, post-edit hook)~~ DONE.
-2. Worktrees DONE; auto-branch + `/commit` + `/pr` DONE.
-3. ~~`/compact`, session search, `fetch` tool, todo tool~~ DONE; `/ps` background manager DONE.
-4. ~~tmux adapter (unix), `/share` transcript export~~ DONE (`ap tmux` / `/spawn`; graceful on Windows).
-5. ~~Re-evaluate MCP once real demand appears~~ DONE — MCP client + ACP adapter shipped (see Status).
+1. ~~**P0 batch**~~ DONE.
+2. ~~Worktrees · auto-branch · `/commit` · `/pr`~~ DONE.
+3. ~~`/compact` · session search · fetch · todo · `/ps`~~ DONE; Compaction 2.0 DONE.
+4. ~~tmux adapter · `/share`~~ DONE.
+5. ~~MCP · ACP~~ DONE.
 
-Every step: typecheck → `ap tool`/live verification → `bun run push` (version bump, binaries, npm — automated).
+Every step: typecheck (local `tsc` preferred) → `bun run smoke` / `ap tool` live verification → `bun run push` (version bump, binaries, npm — automated).

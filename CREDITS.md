@@ -53,6 +53,10 @@ are original — they were learned from the projects below. Credit where it's du
 
 - **[Bun](https://bun.sh)** (Oven) — runtime, bundler, and single-binary compiler.
 - **[ripgrep](https://github.com/BurntSushi/ripgrep)** (Andrew Gallant) — the
-  search engine behind `grep`/`glob`'s speed.
+  search engine behind `grep`/`glob`/`repomap`'s speed.
+- **[GitHub CLI (`gh`)](https://cli.github.com)** — used by `/pr` and `ap pr`
+  when present; never bundled.
+- **tmux** — optional unix adapter (`ap tmux` / `/spawn`); detected on PATH,
+  never a dependency. Windows falls back to `/ps` + worktrees.
 - **Vercel Sandbox** — the guardrail-not-a-VM framing that shaped AP's sandbox
   honesty (documented limits, containers recommended for untrusted code).
