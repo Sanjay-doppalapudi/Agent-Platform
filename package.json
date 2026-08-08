@@ -1,6 +1,6 @@
 {
   "name": "@sanjaydoppalapudi/agentplatform",
-  "version": "0.1.16",
+  "version": "0.1.15",
   "description": "Agent Platform (ap) — minimal, fast coding agent CLI (OpenAI-compatible providers)",
   "publishConfig": {
     "access": "public"
@@ -53,6 +53,7 @@
     "dist:mac-x64": "bun build --compile --minify --target=bun-darwin-x64 src/index.ts --outfile dist/ap-darwin-x64"
   },
   "devDependencies": {
-    "@types/bun": "^1.2.0"
+    "@types/bun": "^1.2.0",
+    "typescript": "5.9.2"
   }
 }

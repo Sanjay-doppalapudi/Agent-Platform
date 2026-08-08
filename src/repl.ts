@@ -1132,7 +1132,7 @@ export async function replMain(flags: CliFlags) {
             if (lastFlowName) console.log(dim(`last: ${lastFlowName} — /flow last to rerun`));
             continue;
           }
-          const runName = name === "last" ? lastFlowName : name;
+          const runName: string | null = name === "last" ? lastFlowName : name;
           if (!runName) {
             console.log(dim(name === "last" ? "no previous flow this session" : "usage: /flow <name> | list | last"));
             continue;
@@ -1817,6 +1817,9 @@ export async function replMain(flags: CliFlags) {
       turnT0 = 0;
       // Resolve pricing for the current model in the background (disk-cached
       // catalog; re-resolves only after a model switch).
+      // Assert through Pricing|null: CFA treats `pricing` as always-null after
+      // `pricing = null` below because the only non-null write is inside .then().
+      const priced = pricing as import("./models.ts").Pricing | null;
       const modelKey = `${provider.name}/${provider.model}`;
       if (!config.light && pricedFor !== modelKey) {
         pricedFor = modelKey;
@@ -1845,12 +1848,12 @@ export async function replMain(flags: CliFlags) {
           ctxNote += " — /compact frees context";
         }
       } catch {}
-      if (pricing && (totals.prompt || totals.completion)) {
+      if (priced && (totals.prompt || totals.completion)) {
         const cachedTok = totals.cached;
         const usd =
-          ((totals.prompt - cachedTok) * pricing.input +
-            cachedTok * (pricing.cacheRead ?? pricing.input) +
-            totals.completion * pricing.output) / 1e6;
+          ((totals.prompt - cachedTok) * priced.input +
+            cachedTok * (priced.cacheRead ?? priced.input) +
+            totals.completion * priced.output) / 1e6;
         if (usd > 0) {
           costNote = usd < 0.01 ? ` · ~$${usd.toFixed(4)}` : usd < 1 ? ` · ~$${usd.toFixed(3)}` : ` · ~$${usd.toFixed(2)}`;
         }

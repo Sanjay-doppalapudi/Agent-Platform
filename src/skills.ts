@@ -31,7 +31,7 @@ function parseFrontmatter(md: string): Record<string, string> {
 }
 
 function scanDir(dir: string, source: string, into: Map<string, SkillInfo>, depth = 0) {
-  let entries: string[];
+  let entries;
   try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const e of entries) {
     if (!e.isDirectory()) continue;
