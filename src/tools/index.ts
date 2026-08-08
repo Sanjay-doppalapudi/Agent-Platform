@@ -17,6 +17,7 @@ import { editTool } from "./edit.ts";
 import { bashTool } from "./bash.ts";
 import { globTool } from "./glob.ts";
 import { grepTool } from "./grep.ts";
+import { repomapTool } from "./repomap.ts";
 import { agentTool } from "./agent.ts";
 import { artifactTool } from "./artifact.ts";
 import { fetchTool } from "./fetch.ts";
@@ -146,6 +147,20 @@ export const TOOLS: ToolDef[] = [
     run: grepTool,
   },
   {
+    name: "repomap",
+    description: "Outline a directory: file list plus definition-ish symbol lines (via ripgrep). Prefer before blind grep on unfamiliar code.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "subdirectory to map (default: cwd)" },
+        query: { type: "string", description: "filter symbol lines containing this text" },
+      },
+    },
+    readOnly: true,
+    fullOnly: true,
+    run: repomapTool,
+  },
+  {
     name: "agent",
     description: "Delegate an independent subtask to a parallel subagent; returns its final answer. background:true detaches it — the tool returns immediately and the result arrives with the next turn.",
     parameters: {
@@ -156,6 +171,7 @@ export const TOOLS: ToolDef[] = [
         cwd: { type: "string" },
         timeout: { type: "number", description: "seconds, default 300" },
         background: { type: "boolean", description: "run detached; result is delivered as a note on the next turn" },
+        channel: { type: "string", description: "optional in-process channel id; result is also posted for the next turn" },
       },
       required: ["task"],
     },
@@ -249,9 +265,18 @@ export function registerDynamicTools(defs: ToolDef[], aliases: Record<string, st
   dynamicSchemasPlan = all.filter((t) => t.readOnly).map(toSchema);
 }
 
+/** Clear MCP/dynamic tools so reloadMcp can re-register (prefix cache miss). */
+export function clearDynamicTools() {
+  dynamicTools.clear();
+  dynamicAliases.clear();
+  dynamicSchemasCode = [];
+  dynamicSchemasPlan = [];
+}
+
 // Weaker models invent tool names — map the common guesses to real tools.
 const NAME_ALIASES: Record<string, string> = {
   search: "grep", rg: "grep",
+  map: "repomap", repo_map: "repomap", outline: "repomap", codebase_map: "repomap",
   list: "glob", ls: "glob", find: "glob", find_files: "glob", list_files: "glob",
   shell: "bash", terminal: "bash", run_command: "bash", execute: "bash", exec: "bash", sh: "bash", cmd: "bash",
   create: "write", create_file: "write", write_file: "write", save: "write",
@@ -409,13 +434,40 @@ export function permissionFor(config: Config, tool: string, argsRaw: string): Pe
       const strict = Object.entries(val).some(([p, v]) => p !== "*" && (v === "deny" || v === "ask"));
       return strict ? "ask" : val["*"] ?? null;
     }
-    for (const [pat, v] of Object.entries(val)) {
-      if (pat !== "*" && globRe(pat).test(cmd)) return v;
+    // Split compound shell lines so `echo x && git push` matches "git push*".
+    // Best-effort (not a full shell parse) — same honesty as scanDangerous.
+    const segments = splitShellSegments(cmd);
+    let best: PermissionVerdict | null = null;
+    for (const seg of segments) {
+      let hit: PermissionVerdict | null = null;
+      for (const [pat, v] of Object.entries(val)) {
+        if (pat !== "*" && globRe(pat).test(seg)) { hit = v; break; }
+      }
+      if (!hit && val["*"]) hit = val["*"];
+      best = stricterPermission(best, hit);
     }
-    if (val["*"]) return val["*"];
-    return null;
+    return best;
   }
   return null;
+}
+
+/** Split on && || ; | and newlines. Trims empties. */
+export function splitShellSegments(cmd: string): string[] {
+  return cmd
+    .split(/(?:&&|\|\||;|\n|(?<!\|)\|(?!\|))/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+const PERM_RANK: Record<PermissionVerdict, number> = { allow: 0, ask: 1, deny: 2 };
+
+function stricterPermission(
+  a: PermissionVerdict | null,
+  b: PermissionVerdict | null,
+): PermissionVerdict | null {
+  if (!a) return b;
+  if (!b) return a;
+  return PERM_RANK[b] > PERM_RANK[a] ? b : a;
 }
 
 /** Execute one tool call; returns model-facing result text (errors included). */

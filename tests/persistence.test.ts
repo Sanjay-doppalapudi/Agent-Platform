@@ -74,6 +74,23 @@ describe("session meta", () => {
     const s = Session.create(dir, { cwd: ".", model: "m", at: "t" });
     expect(Session.load(dir, s.id).meta?.checkpointId).toBeUndefined();
   });
+
+  test("rename appends title meta (load last-wins) and delete removes the file", () => {
+    const dir = dataDir();
+    const s = Session.create(dir, { cwd: ".", model: "m", at: "t" });
+    s.append({ role: "user", content: "hi" });
+    Session.rename(dir, s.id, "  my feature work  ");
+    const loaded = Session.load(dir, s.id);
+    expect(loaded.meta?.title).toBe("my feature work");
+    expect(loaded.history.length).toBe(1);
+
+    Session.rename(dir, s.id, ""); // clear
+    expect(Session.load(dir, s.id).meta?.title).toBeUndefined();
+
+    Session.delete(dir, s.id);
+    expect(() => Session.load(dir, s.id)).toThrow();
+    expect(Session.list(dir).some((x) => x.id === s.id)).toBe(false);
+  });
 });
 
 describe("checkpoint work-tree binding", () => {

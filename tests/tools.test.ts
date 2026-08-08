@@ -88,6 +88,9 @@ describe("permissionFor", () => {
     expect(permissionFor(cfg, "bash", JSON.stringify({ cmd: "rm -rf build" }))).toBe("deny");
     expect(permissionFor(cfg, "bash", JSON.stringify({ cmd: "echo hi" }))).toBe("allow");
     expect(permissionFor(cfg, "bash", JSON.stringify({ command: "git push" }))).toBe("ask"); // arg alias
+    // Compound: strictest segment wins
+    expect(permissionFor(cfg, "bash", JSON.stringify({ cmd: "echo hi && git push origin main" }))).toBe("ask");
+    expect(permissionFor(cfg, "bash", JSON.stringify({ cmd: "echo hi; rm -rf build" }))).toBe("deny");
   });
   test("no rule → null (falls back to permissions mode)", () => {
     expect(permissionFor(cfg, "read", "{}")).toBeNull();
@@ -133,5 +136,18 @@ describe("parseArgsLenient double-encoding (via execTool)", () => {
     } as any);
     expect(r.error).toBe(false);
     expect(r.output).toContain("content here");
+  });
+});
+
+describe("grep file path (Windows cwd)", () => {
+  test("grepping a single file does not set cwd to that file", async () => {
+    writeFileSync(join(tmp, "needle.txt"), "hello Agent Platform world\n");
+    const r = await execTool(
+      "grep",
+      JSON.stringify({ pattern: "Agent Platform", path: join(tmp, "needle.txt") }),
+      ctx,
+    );
+    expect(r.error).toBeFalsy();
+    expect(r.output).toContain("Agent Platform");
   });
 });

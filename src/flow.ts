@@ -13,11 +13,12 @@
 //       agent(`audit part ${n} of: ${files}`, { schema: { type: "object", ... } })));
 //     return findings.filter(Boolean);
 //   }
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Config } from "./config.ts";
+import { postChannel, readChannel } from "./channels.ts";
 import { runSubagent } from "./tools/subagent.ts";
 
 const MAX_FLOW_AGENTS = 50;
@@ -40,6 +41,10 @@ export interface FlowApi {
   parallel: <T>(thunks: (() => Promise<T>)[], cap?: number) => Promise<(T | null)[]>;
   log: (msg: string) => void;
   args: string[];
+  channel: {
+    post: (id: string, text: string, from?: string) => boolean;
+    read: (id: string, limit?: number) => { at: string; from: string; text: string }[];
+  };
 }
 
 /** Injectable for tests: what one agent() call actually does. */
@@ -59,6 +64,25 @@ export function resolveFlowPath(config: Config, name: string): string | null {
     }
   }
   return null;
+}
+
+/** Discover runnable workflow scripts (name without extension). */
+export function listFlows(config: Config): { name: string; path: string }[] {
+  const seen = new Set<string>();
+  const out: { name: string; path: string }[] = [];
+  for (const dir of [join(config.cwd, ".ap", "workflows"), join(config.dataDir, "workflows")]) {
+    try {
+      for (const f of readdirSync(dir).sort()) {
+        const m = f.match(/^([\w-]+)\.(ts|js|mjs)$/);
+        if (!m) continue;
+        const name = m[1]!;
+        if (seen.has(name)) continue;
+        seen.add(name);
+        out.push({ name, path: join(dir, f) });
+      }
+    } catch {}
+  }
+  return out;
 }
 
 /** Concurrency-capped parallel: all thunks settle; failures become null. */
@@ -226,6 +250,10 @@ export async function runFlow(
     parallel: boundedParallel,
     log: (msg) => out(String(msg)),
     args,
+    channel: {
+      post: (id, text, from = "flow") => postChannel(config.dataDir, id, from, text),
+      read: (id, limit) => readChannel(config.dataDir, id, limit),
+    },
   };
   return fn(api);
 }

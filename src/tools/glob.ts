@@ -21,13 +21,14 @@ export async function globTool(
   const ignores = allIgnores(ctx.config);
 
   let rels: string[];
-  if (Bun.which("rg")) {
+  const rg = Bun.which("rg");
+  if (rg) {
     const rgArgs = ["--files", "--hidden", "-g", args.pattern];
     for (const ig of ignores) rgArgs.push("-g", `!**/${ig}/**`, "-g", `!${ig}/**`);
     // Never enumerate AP-private data (read hard-denies it — listing it here
     // leaked transcript and credential filenames).
     if (ctx.config.sandbox !== "off") rgArgs.push(...privateExcludeGlobs(ctx.config, root));
-    const proc = Bun.spawn(["rg", ...rgArgs], { cwd: root, stdout: "pipe", stderr: "ignore" });
+    const proc = Bun.spawn([rg, ...rgArgs], { cwd: root, stdout: "pipe", stderr: "ignore" });
     const out = await new Response(proc.stdout).text();
     await proc.exited;
     rels = out.split("\n").filter(Boolean).slice(0, MAX_SCAN);

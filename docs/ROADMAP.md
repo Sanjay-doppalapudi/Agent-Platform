@@ -1,19 +1,22 @@
 # AP feature roadmap — competitive survey & implementation report
 
-Generated 2026-08-01, status updated 2026-08-04. Sources surveyed: opencode, Claude Code, OpenAI Codex CLI, Cline, xAI Grok Build, Nous Hermes Agent, OpenClaw, tmux. Constraint for everything below: **zero or near-zero dependencies, nothing on the startup hot path, prompt-prefix byte-stability preserved, every feature gated off in `ap --light`.**
+Generated 2026-08-01, status updated 2026-08-07. Sources surveyed: opencode, Claude Code, OpenAI Codex CLI, Cline, xAI Grok Build, Nous Hermes Agent, OpenClaw, tmux. Constraint for everything below: **zero or near-zero dependencies, nothing on the startup hot path, prompt-prefix byte-stability preserved, every feature gated off in `ap --light`.**
 
-## Status (2026-08-04) — shipped since this survey
+## Status (2026-08-07) — shipped since this survey
 
 - **All of P0 and P1** (checkpoints/undo, subagents, custom commands, AGENTS.md, @file, tool hooks, /compact, session search, worktrees, fetch+todo tools, resume picker).
 - **Web**: `websearch` (DuckDuckGo scrape) + plain `fetch`; browser rendering is disabled until it can enforce the hostname policy across redirects.
 - **Loop mode** (`ap loop`): work→check→audit until verifiably done; stall detection, compaction, per-iteration diffs, LOOP_BLOCKED.
 - **Read-scoped sandbox**: reads outside the workspace permit-gated, AP-private data hard-denied, bash path scanning.
-- **Skills**: skills.sh / Claude Code SKILL.md packs, zero-dep GitHub installer.
-- **MCP client** (was P2 → shipped): stdio + Streamable HTTP, Claude-Code-format config, dynamic tools frozen for cache stability, `ap mcp` CLI.
+- **Skills**: skills.sh / Claude Code SKILL.md packs, zero-dep GitHub installer (nested folders discovered).
+- **MCP client** (was P2 → shipped): stdio + Streamable HTTP, Claude-Code-format config, dynamic tools frozen for cache stability, `ap mcp` CLI; `/mcp reload`, soft auto-background onto task queue.
 - **ACP adapter** (was P2 → shipped): `ap acp` for Zed — session modes, native permission dialogs, slash commands, session load, editor-MCP passthrough.
-- **Lifecycle hooks**: `hooks.onDone`/`onError` — shell command or webhook POST when a turn finishes.
+- **Lifecycle hooks**: `hooks.onDone`/`onError` — shell command or webhook POST when a turn finishes; `preCompact`/`postCompact` too.
+- **Tier A (2026-08)**: repo-keyed memory, Compaction 2.0 (`/archives`, `/restore-context`, auto-memory), compound bash permissions, `repomap` tool, in-process agent channels.
+- **Tier B (2026-08)**: `/flow` list/last, `/thinking`, `/confirm edits`, `.ap/DECISIONS.md`, `/rewind`, `/commit --staged|--sign`, bracketed paste, afterEdit `AP_ARGS.paths`, richer Retry-After, REPL `/agent` profiles.
+- **Git + tmux (2026-08)**: `git.autoBranch` on first mutation, `/pr` + `ap pr` (`gh pr create`), optional `ap tmux` / `/spawn` (unix; clear fallback on Windows).
 
-Remaining candidates: `/share` transcript export, tmux adapter (unix), `/ps` background manager, auto-branch + `/commit`, skill self-improvement.
+Remaining candidates: none from the original Tier A/B/remaining set — further work is polish and competitive catch-up only.
 
 ## The two-profile model (implemented)
 
@@ -103,9 +106,9 @@ PR flow: `gh pr create` via the bash tool already works today (user's gh is auth
 ## 5. Suggested build order
 
 1. ~~**P0 batch** (checkpoints+/undo, subagents, custom commands, AGENTS.md, @file, post-edit hook)~~ DONE.
-2. Worktrees DONE; auto-branch + `/commit` (§4) remain.
-3. ~~`/compact`, session search, `fetch` tool, todo tool~~ DONE; `/ps` background manager remains.
-4. tmux adapter (unix), `/share` transcript export — still open.
+2. Worktrees DONE; auto-branch + `/commit` + `/pr` DONE.
+3. ~~`/compact`, session search, `fetch` tool, todo tool~~ DONE; `/ps` background manager DONE.
+4. ~~tmux adapter (unix), `/share` transcript export~~ DONE (`ap tmux` / `/spawn`; graceful on Windows).
 5. ~~Re-evaluate MCP once real demand appears~~ DONE — MCP client + ACP adapter shipped (see Status).
 
 Every step: typecheck → `ap tool`/live verification → `bun run push` (version bump, binaries, npm — automated).

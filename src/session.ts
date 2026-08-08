@@ -1,6 +1,6 @@
 // Append-only JSONL session store. Crash-safe by construction: a partial
 // trailing line is ignored on load.
-import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Msg } from "./provider.ts";
 
@@ -54,6 +54,13 @@ export interface SessionMeta {
   /** Shadow-git checkpoint repo this session continues (set by /compact) so
    *  the undo trail survives compaction and restarts. */
   checkpointId?: string;
+  /** Optional human label — does not rename the file (mtime/`--continue`
+   *  still key on id). Appended as a later meta line; load() last-wins. */
+  title?: string;
+  /** Prior session id when this session was created by compaction. */
+  parentSessionId?: string;
+  /** Why compaction ran (manual | auto | loop). */
+  compactReason?: string;
 }
 
 export class Session {
@@ -77,6 +84,13 @@ export class Session {
     // silently deleting this message from every future load.
     appendFileSync(this.file, (this.torn ? "\n" : "") + JSON.stringify({ t: "msg", ...msg }) + "\n");
     this.torn = false;
+  }
+
+  /** Append a meta line (load() last-wins). Used for title / checkpointId. */
+  writeMeta(meta: SessionMeta) {
+    appendFileSync(this.file, (this.torn ? "\n" : "") + JSON.stringify({ t: "meta", ...meta }) + "\n");
+    this.torn = false;
+    this.meta = meta;
   }
 
   static dir(dataDir: string): string {
@@ -151,5 +165,55 @@ export class Session {
   static delete(dataDir: string, id: string) {
     const file = join(Session.dir(dataDir), `${id}.jsonl`);
     if (existsSync(file)) unlinkSync(file);
+  }
+
+  /**
+   * Drop the last `n` user turns and everything after each cut point's first
+   * dropped user message. Rewrites the JSONL file atomically (temp → rename).
+   * Does not touch the workspace — pair with /undo for file rollback.
+   */
+  rewind(n = 1): number {
+    if (n < 1) return 0;
+    let userCount = 0;
+    let cut = this.history.length;
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      if (this.history[i]!.role === "user") {
+        userCount++;
+        cut = i;
+        if (userCount >= n) break;
+      }
+    }
+    if (userCount === 0) return 0;
+    const dropped = this.history.length - cut;
+    this.history = this.history.slice(0, cut);
+    const tmp = this.file + ".tmp";
+    const lines: string[] = [];
+    if (this.meta) lines.push(JSON.stringify({ t: "meta", ...this.meta }));
+    for (const msg of this.history) {
+      sanitizeToolCallArgs(msg);
+      lines.push(JSON.stringify({ t: "msg", ...msg }));
+    }
+    writeFileSync(tmp, lines.length ? lines.join("\n") + "\n" : "");
+    renameSync(tmp, this.file);
+    this.torn = false;
+    return dropped;
+  }
+
+  /** Set/clear the session title by appending a meta line (load last-wins).
+   *  Empty title clears it. Returns the loaded session or throws if missing. */
+  static rename(dataDir: string, id: string, title: string): Session {
+    const s = Session.load(dataDir, id);
+    const cleaned = title.replace(/\s+/g, " ").trim().slice(0, 120);
+    const meta: SessionMeta = {
+      cwd: s.meta?.cwd ?? "",
+      model: s.meta?.model ?? "",
+      at: s.meta?.at ?? new Date().toISOString(),
+      checkpointId: s.meta?.checkpointId,
+      parentSessionId: s.meta?.parentSessionId,
+      compactReason: s.meta?.compactReason,
+      ...(cleaned ? { title: cleaned } : {}),
+    };
+    s.writeMeta(meta);
+    return s;
   }
 }

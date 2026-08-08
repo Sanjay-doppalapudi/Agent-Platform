@@ -5,6 +5,17 @@ import { homedir, tmpdir } from "node:os";
 import type { Config } from "../config.ts";
 import type { ToolCtx } from "./index.ts";
 
+/** Absolute path to ripgrep. Spawn this — bare `"rg"` ENOENTs on Windows when
+ *  `Bun.which` finds it in a user-local dir that CreateProcess doesn't search
+ *  the same way as Bun's PATH lookup. */
+export function requireRg(): string {
+  const rg = Bun.which("rg");
+  if (!rg) {
+    throw new ToolError("ripgrep (rg) not found on PATH — install from https://github.com/BurntSushi/ripgrep");
+  }
+  return rg;
+}
+
 // Matched as path segments anywhere in a path — build-server/builds, trash, etc.
 export const HARD_IGNORES = [
   "node_modules",

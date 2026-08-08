@@ -53,14 +53,52 @@ export function isBlockedFetchHost(host: string): string | null {
   } else if (ipVersion === 6) {
     // fd00:ec2::254 (AWS IMDS), fe80::/10 link-local, ::ffff:169.254.x.x
     if (bare === "fd00:ec2::254" || bare.startsWith("fd00:ec2:")) return "cloud metadata address";
-    const firstHextet = Number.parseInt(bare.split(":", 1)[0] ?? "", 16);
-    if (Number.isFinite(firstHextet) && (firstHextet & 0xffc0) === 0xfe80) {
-      return "link-local address";
+    const hx = hextets(bare);
+    if (hx) {
+      if ((hx[0]! & 0xffc0) === 0xfe80) return "link-local address";
+      // An IPv4 address embedded in IPv6 reaches the SAME host on a
+      // dual-stack socket, so it must face the same policy. Checked
+      // numerically: new URL() re-serializes [::ffff:169.254.169.254] as
+      // [::ffff:a9fe:a9fe], so a dotted-quad regex alone never fires on
+      // anything that came through URL parsing.
+      const v4 = embeddedIPv4(hx);
+      if (v4) return isBlockedFetchHost(v4);
     }
+    // Kept for the dotted spelling, which dns.lookup can still return.
     const v4mapped = bare.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/i);
     if (v4mapped) return isBlockedFetchHost(v4mapped[1]!);
   }
   return null;
+}
+
+/** Expand an IPv6 literal (with optional "::") into 8 numeric hextets. */
+function hextets(ip: string): number[] | null {
+  if (ip.includes(".")) return null; // dotted tail — handled by the regex branch
+  const halves = ip.split("::");
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(":") : [];
+  const tail = halves.length === 2 ? (halves[1] ? halves[1].split(":") : []) : null;
+  let parts: string[];
+  if (tail === null) parts = head;
+  else {
+    const fill = 8 - head.length - tail.length;
+    if (fill < 0) return null;
+    parts = [...head, ...Array(fill).fill("0"), ...tail];
+  }
+  if (parts.length !== 8) return null;
+  const out = parts.map((p) => Number.parseInt(p, 16));
+  return out.every((n) => Number.isFinite(n) && n >= 0 && n <= 0xffff) ? out : null;
+}
+
+/** Dotted IPv4 embedded in an IPv6 address: ::ffff:a.b.c.d (v4-mapped),
+ *  ::a.b.c.d (v4-compatible), 64:ff9b::a.b.c.d (NAT64). */
+function embeddedIPv4(x: number[]): string | null {
+  const zeros5 = x[0] === 0 && x[1] === 0 && x[2] === 0 && x[3] === 0 && x[4] === 0;
+  const mapped = zeros5 && x[5] === 0xffff;
+  const compat = zeros5 && x[5] === 0 && x[6] !== 0; // excludes :: and ::1
+  const nat64 = x[0] === 0x64 && x[1] === 0xff9b && x[2] === 0 && x[3] === 0 && x[4] === 0 && x[5] === 0;
+  if (!(mapped || compat || nat64)) return null;
+  return [x[6]! >>> 8, x[6]! & 255, x[7]! >>> 8, x[7]! & 255].join(".");
 }
 
 export function assertFetchUrlAllowed(raw: string): URL {
@@ -111,11 +149,17 @@ async function requestOnce(url: URL, signal: AbortSignal): Promise<{ incoming: I
       signal,
       // Pin the already-vetted DNS result. Without this callback, a hostname
       // can rebind between validation and connect.
+      //
+      // net.Socket calls lookup with {all: true} and then sorts the result,
+      // so the callback MUST hand back an ARRAY in that mode. Replying with
+      // the 3-arg (err, address, family) form made every hostname fetch die
+      // with "results.sort is not a function" — literal-IP URLs still worked,
+      // which is why it was not obvious.
       lookup: (
         _host: string,
-        _opts: unknown,
-        done: (error: Error | null, address: string, family: number) => void,
-      ) => done(null, address, family),
+        opts: { all?: boolean } | undefined,
+        done: (error: Error | null, address: string | { address: string; family: number }[], family?: number) => void,
+      ) => (opts?.all ? done(null, [{ address, family }]) : done(null, address, family)),
     } as any, (incoming) => resolve({ incoming, response: responseFromIncoming(incoming) }));
     req.once("error", reject);
     req.end();
@@ -163,7 +207,36 @@ export async function fetchTool(
   if (/image|video|audio|octet-stream|zip|pdf/.test(type)) {
     return `binary content (${type}) at ${url} — not fetched`;
   }
-  const raw = await res.text();
+  // Read a BOUNDED prefix. res.text() buffers whatever the server sends, so a
+  // hostile (or merely huge) URL could pull gigabytes into memory before the
+  // MAX_BYTES truncation ever ran. Stop at a small multiple of the cap —
+  // enough that HTML stripping still has material to work with.
+  const raw = await readCapped(res, MAX_BYTES * 4);
   const text = /html/.test(type) || raw.trimStart().startsWith("<") ? htmlToText(raw) : raw;
   return truncateMiddle(text, MAX_BYTES) || "(empty response)";
+}
+
+/** Decode at most `limit` bytes of a response, then drop the connection. */
+async function readCapped(res: Response, limit: number): Promise<string> {
+  const body = res.body;
+  if (!body) return "";
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      chunks.push(value);
+      total += value.byteLength;
+      if (total >= limit) break;
+    }
+  } finally {
+    try { await reader.cancel(); } catch {}
+  }
+  const buf = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) { buf.set(c, at); at += c.byteLength; }
+  return new TextDecoder().decode(buf.subarray(0, Math.min(total, limit)));
 }

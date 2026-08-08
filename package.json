@@ -43,6 +43,7 @@
     "dev": "bun run src/index.ts",
     "push": "bun scripts/push.ts",
     "test": "bun test tests",
+    "smoke": "bun run scripts/smoke-userpath.ts",
     "typecheck": "bun x tsc --noEmit",
     "compile": "bun build --compile --minify src/index.ts --outfile ap.exe && ap.exe --version",
     "dist": "bun run dist:win && bun run dist:linux && bun run dist:mac-arm && bun run dist:mac-x64",

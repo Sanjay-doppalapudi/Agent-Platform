@@ -3,20 +3,22 @@
 import { emitKeypressEvents } from "node:readline";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
-import { loadConfig, resolveProvider } from "./config.ts";
+import { loadConfig, providerForMode, resolveProvider } from "./config.ts";
+import { drainSteerNotes, pendingSteerCount, pushSteer } from "./steer.ts";
 import { initMcp } from "./mcp.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
 import { Checkpoints } from "./checkpoint.ts";
-import { streamChat } from "./provider.ts";
 import { allIgnores, readRoots, sandboxRoots } from "./tools/shared.ts";
 import { getTool, type PermitFn } from "./tools/index.ts";
 import { listSubagents } from "./tools/agent.ts";
-import { buildSystemPrompt } from "./prompt.ts";
+import { buildSystemPrompt, clearPromptSnapshots } from "./prompt.ts";
 import { readLine, type SlashCommand } from "./input.ts";
 import { MdRenderer } from "./md.ts";
 import { errorHint, renderDiff, toolLabel, toolSummary } from "./ui.ts";
 import { Session } from "./session.ts";
 import { clearLive, publishLive } from "./live.ts";
+import { compactSession, listArchives, restoreContextNote } from "./compact.ts";
+import { streamChat } from "./provider.ts";
 import { currentTheme, EFFORT_LEVELS, fitLine, fitSegments, frameBottom, frameTop, frameWidth, paint, parseEffort, setTheme, themeNames, THEMES, visibleLen, type EffortLevel, type StatusSegment } from "./theme.ts";
 import type { Usage } from "./stream.ts";
 import type { CliFlags } from "./index.ts";
@@ -59,10 +61,12 @@ function rowsUp(s: string): number {
 }
 
 const BUILTIN_CMDS = new Set([
-  "exit", "q", "quit", "new", "resume", "session", "sessions", "sandbox",
-  "model", "models", "mode", "plan", "code", "system", "context", "agents", "effort", "theme",
-  "undo", "diff", "checkpoints", "restore", "worktree", "compact", "share", "ps", "commit",
-  "tasks", "flow", "artifacts", "watch",
+  "exit", "q", "quit", "new", "resume", "session", "sessions", "rename", "sandbox",
+  "model", "models", "mode", "plan", "code", "system", "context", "agents", "effort",
+  "thinking", "confirm", "theme", "agent", "rewind",
+  "undo", "diff", "checkpoints", "restore", "worktree", "compact", "archives",
+  "restore-context", "share", "ps", "commit",
+  "tasks", "flow", "artifacts", "watch", "steer",
 ]);
 
 const COMMANDS: SlashCommand[] = [
@@ -70,26 +74,37 @@ const COMMANDS: SlashCommand[] = [
   { name: "/code", desc: "full mode: all tools (default)" },
   { name: "/model", desc: "pick provider → model (filterable, models.dev), or /model <provider>/<model>", hasArg: true },
   { name: "/effort", desc: "reasoning effort: low|medium|high|off (models.dev-aware)", hasArg: true },
+  { name: "/thinking", desc: "show or hide reasoning: on|off", hasArg: true },
+  { name: "/confirm", desc: "confirm every edit/write: edits on|off", hasArg: true },
   { name: "/new", desc: "start a fresh session" },
   { name: "/resume", desc: "resume a session by id", hasArg: true },
-  { name: "/sessions", desc: "list recent sessions" },
+  { name: "/sessions", desc: "list | delete <id> | rename <id> <title>", hasArg: true },
+  { name: "/rename", desc: "set a title on the current session", hasArg: true },
+  { name: "/steer", desc: "queue coaching for the next turn (or ctrl+s mid-turn)", hasArg: true },
   { name: "/sandbox", desc: "show or toggle the write-sandbox", hasArg: true },
   { name: "/theme", desc: "list or switch color themes", hasArg: true },
   { name: "/agents", desc: "list subagents spawned this session" },
   { name: "/tasks", desc: "background tasks: list | kill <id>", hasArg: true },
-  { name: "/flow", desc: "run a workflow script: /flow <name> [args…]", hasArg: true },
+  { name: "/flow", desc: "list | last | <name> [args…] — .ap/workflows/<name>.ts", hasArg: true },
   { name: "/artifacts", desc: "list generated artifacts" },
   { name: "/watch", desc: "interactive viewer: agents, tasks, flows (←/→ switch · Esc back · ctrl+g mid-turn)" },
   { name: "/ps", desc: "background processes: list | tail <pid> | kill <pid>", hasArg: true },
-  { name: "/skills", desc: "list available SKILL.md packs" },
-  { name: "/mcp", desc: "list MCP servers and their tools" },
+  { name: "/skills", desc: "list available SKILL.md packs | reload", hasArg: true },
+  { name: "/mcp", desc: "list MCP servers | reload (rebuilds tools; cache miss)", hasArg: true },
   { name: "/undo", desc: "restore the previous checkpoint" },
-  { name: "/diff", desc: "diff of the last checkpoint (+pending)", hasArg: true },
+  { name: "/diff", desc: "checkpoint N | git | <branch> (vs merge-base)", hasArg: true },
   { name: "/checkpoints", desc: "list workspace checkpoints" },
   { name: "/restore", desc: "restore a checkpoint by hash", hasArg: true },
   { name: "/worktree", desc: "new <slug> | list | back | merge <slug>", hasArg: true },
-  { name: "/commit", desc: "stage all + commit with a drafted message (never pushes)", hasArg: true },
+  { name: "/commit", desc: "commit [--staged] [--sign] [message] — never pushes", hasArg: true },
+  { name: "/pr", desc: "create a GitHub PR via gh [--draft] [--base <branch>] [title]", hasArg: true },
+  { name: "/spawn", desc: "detach a task in tmux (unix) or print the Windows fallback", hasArg: true },
+  { name: "/tmux", desc: "list | layout | capture <session> — optional unix adapter", hasArg: true },
   { name: "/compact", desc: "summarize history into a fresh session" },
+  { name: "/archives", desc: "list recent compaction archives" },
+  { name: "/restore-context", desc: "inject a note from an archived session id", hasArg: true },
+  { name: "/rewind", desc: "drop last N user turns from history (not files)", hasArg: true },
+  { name: "/agent", desc: "apply named agent profile to this session | clear", hasArg: true },
   { name: "/share", desc: "export the transcript as one self-contained HTML file" },
   { name: "/system", desc: "show the system prompt" },
   { name: "/context", desc: "show context/token usage" },
@@ -245,8 +260,22 @@ export async function replMain(flags: CliFlags) {
   const config = loadConfig(flags);
   if (config.theme) setTheme(config.theme);
   let provider: ReturnType<typeof resolveProvider>;
+  /** Snapshotted code-mode provider so /plan → /code restores it when
+   *  codeModel is unset (planModel alone must not permanently steal the slot). */
+  let codeProvider: ReturnType<typeof resolveProvider>;
   try {
     provider = resolveProvider(config, flags);
+    codeProvider = provider;
+    // Per-mode model defaults (planModel/codeModel) apply when the user did
+    // not pass -m / --model for this invocation.
+    if (!flags.model && !process.env.HARNESS_MODEL) {
+      if (config.mode === "code" && config.codeModel) {
+        provider = providerForMode(config, "code", provider);
+        codeProvider = provider;
+      } else if (config.mode === "plan") {
+        provider = providerForMode(config, "plan", provider);
+      }
+    }
   } catch (e) {
     if (Object.keys(config.providers).length || flags.baseUrl) throw e;
     // First run, nothing configured — a guided path beats a raw error.
@@ -305,15 +334,37 @@ export async function replMain(flags: CliFlags) {
   // Live turn state for the spinner: elapsed seconds + rough output tokens.
   let turnT0 = 0;
   let turnOut = 0;
+  /** Active tools with start time — spinner ticks per-tool elapsed. */
+  let activeTools = new Map<string, { label: string; t0: number }>();
+  /** Mid-turn steer draft (ctrl+s to start, Enter to queue). */
+  let steerDraft = "";
+  let steering = false;
+  /** True while the sandbox permit prompt owns the keyboard. */
+  let permitBusy = false;
   const spinner = makeSpinner(
     () => {
       if (!turnT0) return "";
       const s = Math.floor((performance.now() - turnT0) / 1000);
-      return `${s >= 1 ? ` · ${s}s` : ""}${turnOut ? ` · ~${Math.round(turnOut / 4)} tok` : ""}`;
+      let toolBit = "";
+      if (activeTools.size === 1) {
+        const t = [...activeTools.values()][0]!;
+        const ts = ((performance.now() - t.t0) / 1000).toFixed(1);
+        toolBit = ` · ${ts}s`;
+      }
+      return `${s >= 1 ? ` · ${s}s` : ""}${toolBit}${turnOut ? ` · ~${Math.round(turnOut / 4)} tok` : ""}`;
     },
     // Live status rides on the spinner line: always the last row of output,
     // always current, no cursor tricks.
-    () => (config.light ? "" : `${statusFor(false)}${dim(" · ctrl+g watch")}`),
+    () => {
+      if (config.light) return "";
+      const steerBit = steering
+        ? yellow(`steer: ${steerDraft || "…"}`)
+        : pendingSteerCount()
+          ? dim(`steer×${pendingSteerCount()}`)
+          : "";
+      const hint = steering ? dim("enter queue · esc cancel") : dim("ctrl+s steer · ctrl+g watch");
+      return [statusFor(false), steerBit, hint].filter(Boolean).join(dim(" · "));
+    },
   );
   const history: string[] = [];
   // One-time contextual hints: teach a feature the first time it matters.
@@ -333,6 +384,13 @@ export async function replMain(flags: CliFlags) {
   let pricedFor = "";
   /** Name of the workflow running right now (status + live snapshot). */
   let activeFlow: string | null = null;
+  let lastFlowName: string | null = null;
+  /** REPL-applied named agent profile (null = none). */
+  let agentRoleBody: string | null = null;
+  let savedAgent: {
+    toolFilter: string[] | undefined;
+    provider: ReturnType<typeof resolveProvider>;
+  } | null = null;
   /** Last computed context %, reused by the cross-process live snapshot so it
    *  never recomputes the (non-trivial) history scan. */
   let lastCtxPct = 0;
@@ -360,11 +418,20 @@ export async function replMain(flags: CliFlags) {
       if (effort) parts.push({ text: muted(`effort ${effort}`), prio: 3 });
       parts.push({ text: pct >= 85 ? red(`ctx ${pct}%`) : pct >= 60 ? yellow(`ctx ${pct}%`) : muted(`ctx ${pct}%`), prio: 0 });
       if (pricing && (spend.prompt || spend.completion)) {
+        // Inline the formula (same as models.estimateUsd) so the status path
+        // never imports models.ts — catalog loading stays off the startup path.
+        const cached = spend.cached;
         const usd =
-          ((spend.prompt - spend.cached) * pricing.input +
-            spend.cached * (pricing.cacheRead ?? pricing.input) +
+          ((spend.prompt - cached) * pricing.input +
+            cached * (pricing.cacheRead ?? pricing.input) +
             spend.completion * pricing.output) / 1e6;
-        if (usd > 0) parts.push({ text: muted(`~$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(3)}`), prio: 4 });
+        if (usd > 0) {
+          const hit = spend.prompt > 0 && cached > 0
+            ? `${Math.min(100, Math.round((cached / spend.prompt) * 100))}%`
+            : "";
+          const money = usd < 0.01 ? `~$${usd.toFixed(4)}` : usd < 1 ? `~$${usd.toFixed(3)}` : `~$${usd.toFixed(2)}`;
+          parts.push({ text: muted(hit ? `${money} · cache ${hit}` : money), prio: 4 });
+        }
       }
       const subs = listSubagents();
       if (subs.length) {
@@ -475,32 +542,26 @@ export async function replMain(flags: CliFlags) {
     });
 
   // Summarize the session into a fresh one (manual /compact + auto-compact).
-  const compactNow = async (): Promise<boolean> => {
+  const compactNow = async (reason: "manual" | "auto" = "manual"): Promise<boolean> => {
     spinner.start("compacting…");
     try {
-      const msgs = [
-        { role: "system" as const, content: "Summarize this coding session for a successor agent: goals, decisions, files touched, current state, open items. Be concise but complete. Output only the summary." },
-        ...session.history,
-        { role: "user" as const, content: "Summarize the session now." },
-      ];
-      let summary = "";
-      await streamChat(provider, msgs, [], (d) => { summary += d; }, undefined, undefined, undefined, config.streamIdleSeconds * 1000);
-      spinner.stop();
-      const old = session.id;
-      session = Session.create(config.dataDir, {
-        cwd: config.cwd,
-        model: provider.model,
-        at: new Date().toISOString(),
-        checkpointId: cpSessionId, // keep /undo reachable across compaction
+      const result = await compactSession({
+        session,
+        config,
+        provider,
+        checkpointId: cpSessionId,
+        reason,
+        idleTimeoutMs: config.streamIdleSeconds * 1000,
       });
+      spinner.stop();
+      // NB: cp is deliberately NOT rebound — rebinding created an empty repo
+      // and silently orphaned every checkpoint made before the compaction.
+      session = result.session;
       config.sessionId = session.id;
       sessionAllows = new Set();
       spend.prompt = spend.cached = spend.completion = 0;
-      // NB: cp is deliberately NOT rebound — rebinding created an empty repo
-      // and silently orphaned every checkpoint made before the compaction.
-      session.append({ role: "user", content: `[Compacted context from session ${old}]\n${summary.trim()}` });
-      session.append({ role: "assistant", content: "Context loaded — continuing from the summary." });
-      console.log(dim(`compacted ${old} → new session ${session.id} (${summary.length} chars of summary) · checkpoint history preserved (/undo still works)`));
+      const mem = result.memoriesWritten ? ` · ${result.memoriesWritten} memor${result.memoriesWritten === 1 ? "y" : "ies"} saved` : "";
+      console.log(dim(`compacted ${result.oldId} → new session ${session.id} (${result.summary.length} chars of summary) · checkpoint history preserved (/undo still works)${mem}`));
       return true;
     } catch (e) {
       spinner.stop();
@@ -544,8 +605,20 @@ export async function replMain(flags: CliFlags) {
       } catch {}
     }
   }
+  let flowMenu: SlashCommand[] = [];
+  if (!config.light) {
+    try {
+      const { listFlows } = await import("./flow.ts");
+      flowMenu = listFlows(config).map((f) => ({
+        name: `/flow ${f.name}`,
+        desc: "workflow",
+        hasArg: true,
+      }));
+    } catch {}
+  }
   const menuCommands = [
     ...COMMANDS,
+    ...flowMenu,
     ...[...customCommands.entries()].map(([n, c]) => ({ name: `/${n}`, desc: c.desc, hasArg: true })),
   ];
 
@@ -625,15 +698,45 @@ export async function replMain(flags: CliFlags) {
     }
   };
 
-  // During a turn (readLine not active) handle ctrl+g / ctrl+o / ctrl+c here.
-  process.stdin.on("keypress", (_s, key) => {
-    if (!key?.ctrl || !ctrl) return;
-    // ctrl+G opens the viewer. NOT ctrl+W: Windows Terminal binds that to
-    // close-pane by default, so the keypress never reaches us — it is kept
-    // only as an alias for terminals that do deliver it.
-    if (key.name === "g" || key.name === "w") { void openWatch(); return; }
-    if (key.name === "o") toggleVerbose(false);
-    else if (key.name === "c") abortTurn();
+  // During a turn (readLine not active): ctrl+g/o/c, plus ctrl+s steer queue.
+  process.stdin.on("keypress", (ch, key) => {
+    if (!ctrl || permitBusy) return;
+    if (key?.ctrl) {
+      // ctrl+G opens the viewer. NOT ctrl+W: Windows Terminal binds that to
+      // close-pane by default, so the keypress never reaches us — it is kept
+      // only as an alias for terminals that do deliver it.
+      if (key.name === "g" || key.name === "w") { void openWatch(); return; }
+      if (key.name === "o") { toggleVerbose(false); return; }
+      if (key.name === "c") { abortTurn(); return; }
+      if (key.name === "s") {
+        steering = !steering;
+        if (!steering) steerDraft = "";
+        else if (!hinted.has("steer")) {
+          hinted.add("steer");
+          process.stdout.write(`\n${dim("  steer mode — type a note, Enter queues it for the next turn, Esc cancels")}\n`);
+        }
+        return;
+      }
+      return;
+    }
+    if (!steering) return;
+    if (key?.name === "escape") { steering = false; steerDraft = ""; return; }
+    if (key?.name === "return" || key?.name === "enter") {
+      if (pushSteer(steerDraft)) {
+        process.stdout.write(`\n${dim(`  queued steer (${pendingSteerCount()}): ${steerDraft.replace(/\s+/g, " ").slice(0, 80)}`)}\n`);
+      }
+      steerDraft = "";
+      steering = false;
+      return;
+    }
+    if (key?.name === "backspace") {
+      steerDraft = steerDraft.slice(0, -1);
+      return;
+    }
+    // Printable character (raw mode delivers it as `ch`).
+    if (typeof ch === "string" && ch.length === 1 && ch >= " ") {
+      if (steerDraft.length < 500) steerDraft += ch;
+    }
   });
 
   const exit = (code = 0): never => {
@@ -741,11 +844,64 @@ export async function replMain(flags: CliFlags) {
           console.log(dim(`/sandbox on|off to toggle`));
           continue;
         }
+        case "rename": {
+          const title = rest.join(" ").trim();
+          if (!title) {
+            console.log(dim(session.meta?.title
+              ? `title: ${session.meta.title} — /rename <title> to change, /sessions rename ${session.id} "" to clear`
+              : `no title — /rename <title>`));
+            continue;
+          }
+          try {
+            session = Session.rename(config.dataDir, session.id, title);
+            console.log(dim(`renamed → ${session.meta?.title}`));
+          } catch (e) { console.log(dim((e as Error).message)); }
+          continue;
+        }
         case "session": case "sessions": {
+          const sub = rest[0]?.toLowerCase();
+          if (sub === "delete" || sub === "rm") {
+            const id = rest[1];
+            if (!id) { console.log(dim("usage: /sessions delete <id>")); continue; }
+            if (id === session.id) { console.log(dim("can't delete the active session — /new or /resume another first")); continue; }
+            try {
+              Session.load(config.dataDir, id); // confirm exists
+              Session.delete(config.dataDir, id);
+              console.log(dim(`deleted ${id}`));
+            } catch (e) { console.log(dim((e as Error).message)); }
+            continue;
+          }
+          if (sub === "rename") {
+            const id = rest[1];
+            const title = rest.slice(2).join(" ");
+            if (!id) { console.log(dim("usage: /sessions rename <id> <title>")); continue; }
+            try {
+              const s = Session.rename(config.dataDir, id, title);
+              if (id === session.id) session = s;
+              console.log(dim(s.meta?.title ? `renamed ${id} → ${s.meta.title}` : `cleared title on ${id}`));
+            } catch (e) { console.log(dim((e as Error).message)); }
+            continue;
+          }
           for (const s of Session.list(config.dataDir)) {
             const mark = s.id === session.id ? cyan("▸") : " ";
-            console.log(`${mark} ${s.id} ${dim(new Date(s.mtime).toLocaleString())}`);
+            let title = "";
+            try { title = Session.load(config.dataDir, s.id).meta?.title ?? ""; } catch {}
+            console.log(`${mark} ${s.id}${title ? ` ${cyan(title)}` : ""} ${dim(new Date(s.mtime).toLocaleString())}`);
           }
+          if (!sub) console.log(dim("/sessions delete <id> · /sessions rename <id> <title> · /rename <title>"));
+          continue;
+        }
+        case "steer": {
+          const text = rest.join(" ").trim();
+          if (!text) {
+            const n = pendingSteerCount();
+            console.log(dim(n
+              ? `${n} steer note(s) queued for the next turn — /steer <text> to add more`
+              : "usage: /steer <text> — or ctrl+s mid-turn to queue coaching without aborting"));
+            continue;
+          }
+          pushSteer(text);
+          console.log(dim(`queued steer (${pendingSteerCount()}): ${text.slice(0, 100)}`));
           continue;
         }
         case "model": {
@@ -763,6 +919,8 @@ export async function replMain(flags: CliFlags) {
               const next = await pickModelInteractive(config, provider);
               if (next) {
                 provider = next;
+                if (config.mode === "code") codeProvider = provider;
+                pricedFor = "";
                 console.log(dim(`provider → ${next.name} (${next.baseUrl}), model → ${next.model}${rememberModel(next.name, next.model)}`));
               } else {
                 console.log(dim(`model: ${provider.name}/${provider.model} (unchanged)`));
@@ -773,6 +931,8 @@ export async function replMain(flags: CliFlags) {
           const slash = arg.indexOf("/");
           if (slash === -1) {
             provider = { ...provider, model: arg };
+            if (config.mode === "code") codeProvider = provider;
+            pricedFor = "";
             console.log(dim(`model → ${provider.model}${rememberModel(provider.name, provider.model)}`));
             continue;
           }
@@ -780,16 +940,22 @@ export async function replMain(flags: CliFlags) {
           const modelId = arg.slice(slash + 1);
           if (pfx === provider.name) {
             provider = { ...provider, model: modelId };
+            if (config.mode === "code") codeProvider = provider;
+            pricedFor = "";
             console.log(dim(`model → ${provider.model}${rememberModel(provider.name, provider.model)}`));
           } else if (config.providers[pfx]) {
             try {
               provider = resolveProvider(config, { provider: pfx, model: modelId } as CliFlags);
+              if (config.mode === "code") codeProvider = provider;
+              pricedFor = "";
               console.log(dim(`provider → ${pfx}, model → ${modelId}${rememberModel(pfx, modelId)}`));
             } catch (e) { console.log(dim((e as Error).message)); }
           } else {
             try {
               const { resolveCatalogProvider } = await import("./models.ts");
               provider = await resolveCatalogProvider(config, pfx, modelId);
+              if (config.mode === "code") codeProvider = provider;
+              pricedFor = "";
               console.log(dim(`provider → ${pfx} via models.dev/config (${provider.baseUrl}), model → ${modelId}${rememberModel(pfx, modelId)}`));
             } catch (e) { console.log(dim((e as Error).message)); }
           }
@@ -820,6 +986,27 @@ export async function replMain(flags: CliFlags) {
             saved = ` · saved to ${p}`;
           } catch (e) { saved = ` · not saved (${(e as Error).message})`; }
           console.log(`${cyan(`theme → ${currentTheme().name}`)}${dim(saved)}`);
+          continue;
+        }
+        case "thinking": {
+          const arg = rest[0]?.toLowerCase();
+          if (arg === "on" || arg === "off") {
+            config.showReasoning = arg;
+            console.log(dim(`thinking → ${arg}`));
+          } else {
+            console.log(dim(`thinking: ${config.showReasoning ?? "on"} — /thinking on|off`));
+          }
+          continue;
+        }
+        case "confirm": {
+          const a0 = rest[0]?.toLowerCase();
+          const a1 = rest[1]?.toLowerCase();
+          if (a0 === "edits" && (a1 === "on" || a1 === "off")) {
+            config.confirmEdits = a1 === "on";
+            console.log(dim(`confirm edits → ${a1}`));
+          } else {
+            console.log(dim(`confirm edits: ${config.confirmEdits ? "on" : "off"} — /confirm edits on|off`));
+          }
           continue;
         }
         case "effort": {
@@ -859,14 +1046,34 @@ export async function replMain(flags: CliFlags) {
         case "mode": case "plan": case "code": {
           const target = cmd === "mode" ? rest[0] : cmd;
           if (target === "plan" || target === "code") {
+            if (config.mode === "code") codeProvider = provider;
             config.mode = target;
+            const prev = provider;
+            if (target === "plan") {
+              provider = config.planModel
+                ? providerForMode(config, "plan", provider)
+                : provider;
+            } else {
+              provider = config.codeModel
+                ? providerForMode(config, "code", codeProvider)
+                : codeProvider;
+            }
+            let modelNote = "";
+            if (prev.name !== provider.name || prev.model !== provider.model) {
+              modelNote = ` · model ${provider.name}/${provider.model}`;
+              pricedFor = ""; // refresh pricing after switch
+            }
             let note = target === "plan" ? " (read-only tools)" : "";
             if (target === "code" && lastPlan) {
               planArmed = true;
               note = " — plan armed: your next message carries the plan and it will be followed exactly";
             }
-            console.log(dim(`mode → ${target}${note}`));
-          } else console.log(dim(`mode: ${config.mode} (use /plan or /code)`));
+            console.log(dim(`mode → ${target}${note}${modelNote}`));
+          } else {
+            const pm = config.planModel ? ` · planModel ${config.planModel}` : "";
+            const cm = config.codeModel ? ` · codeModel ${config.codeModel}` : "";
+            console.log(dim(`mode: ${config.mode}${pm}${cm} (use /plan or /code)`));
+          }
           continue;
         }
         case "system": {
@@ -886,33 +1093,62 @@ export async function replMain(flags: CliFlags) {
           const total = chars + sysChars;
           const pct = Math.round((total / config.contextBudgetChars) * 100);
           const roles = Object.entries(counts).map(([r, n]) => `${n} ${r}`).join(", ") || "empty";
-          console.log(dim(`session ${session.id} · mode ${config.mode}`));
+          const title = session.meta?.title ? ` · ${session.meta.title}` : "";
+          console.log(dim(`session ${session.id}${title} · mode ${config.mode} · ${provider.name}/${provider.model}`));
           console.log(dim(`messages: ${session.history.length} (${roles})`));
           console.log(dim(`context: ~${Math.round(total / 4)} tokens (${total} chars incl. system) · ${pct}% of trim budget (${config.contextBudgetChars} chars)`));
           if (lastUsage) {
-            console.log(dim(`last turn (provider-reported): ${lastUsage.prompt} prompt${lastUsage.cached ? ` (${lastUsage.cached} cached)` : ""} · ${lastUsage.completion} completion`));
+            const hit = lastUsage.cached && lastUsage.prompt
+              ? ` · cache ${Math.min(100, Math.round((lastUsage.cached / lastUsage.prompt) * 100))}%`
+              : "";
+            console.log(dim(`last turn: ↑${lastUsage.prompt}${lastUsage.cached ? ` (${lastUsage.cached} cached)` : ""}${hit} ↓${lastUsage.completion}`));
+            if (pricing) {
+              const { estimateUsd, formatUsd } = await import("./models.ts");
+              const lastUsd = estimateUsd(pricing, {
+                prompt: lastUsage.prompt,
+                cached: lastUsage.cached,
+                completion: lastUsage.completion,
+              });
+              console.log(dim(`cost: last ${formatUsd(lastUsd)} · session ${formatUsd(estimateUsd(pricing, spend))}`));
+            }
+          } else if (pricing && (spend.prompt || spend.completion)) {
+            const { estimateUsd, formatUsd, cacheHitPct } = await import("./models.ts");
+            const hit = cacheHitPct(spend.prompt, spend.cached);
+            console.log(dim(`session spend: ${formatUsd(estimateUsd(pricing, spend))}${hit ? ` · cache ${hit}` : ""}`));
           }
           continue;
         }
         case "flow": {
           if (config.light) { console.log(dim("workflows are not available in --light")); continue; }
+          const { runFlow, listFlows } = await import("./flow.ts");
           const name = rest[0];
-          if (!name) {
-            console.log(dim("usage: /flow <name> [args…] — scripts live in .ap/workflows/<name>.ts"));
+          if (!name || name === "list") {
+            const flows = listFlows(config);
+            if (!flows.length) {
+              console.log(dim("no workflows — add .ap/workflows/<name>.ts"));
+              continue;
+            }
+            for (const f of flows) console.log(`${cyan(f.name)} ${dim(f.path)}`);
+            if (lastFlowName) console.log(dim(`last: ${lastFlowName} — /flow last to rerun`));
+            continue;
+          }
+          const runName = name === "last" ? lastFlowName : name;
+          if (!runName) {
+            console.log(dim(name === "last" ? "no previous flow this session" : "usage: /flow <name> | list | last"));
             continue;
           }
           try {
-            const { runFlow } = await import("./flow.ts");
-            activeFlow = name;
+            activeFlow = runName;
             publishStatus(true, true);
-            const result = await runFlow(config, name, rest.slice(1), (line) => {
+            const result = await runFlow(config, runName, name === "last" ? [] : rest.slice(1), (line) => {
               console.log(dim(`  ${line}`));
               publishStatus(true);
             });
+            lastFlowName = runName;
             if (result !== undefined) {
               console.log(typeof result === "string" ? result : JSON.stringify(result, null, 2));
             }
-            console.log(dim(`flow ${name} finished`));
+            console.log(dim(`flow ${runName} finished`));
           } catch (e) { console.log(red(`flow failed: ${(e as Error).message}`)); }
           finally { activeFlow = null; publishStatus(false, true); }
           continue;
@@ -1004,7 +1240,14 @@ export async function replMain(flags: CliFlags) {
           continue;
         }
         case "skills": {
-          const { discoverSkills } = await import("./skills.ts");
+          const { clearSkillCache, discoverSkills } = await import("./skills.ts");
+          if (rest[0] === "reload") {
+            clearSkillCache();
+            clearPromptSnapshots(session.id);
+            const skills = discoverSkills(config);
+            console.log(dim(`skills reloaded (${skills.length}) — prompt prefix may miss cache until next turns settle`));
+            continue;
+          }
           const skills = discoverSkills(config);
           if (!skills.length) { console.log(dim("no skills — install with: ap skills add <owner>/<repo>")); continue; }
           for (const s of skills) console.log(`${cyan(s.name)} ${dim(`[${s.source}]`)} ${s.description.slice(0, 90)}`);
@@ -1012,7 +1255,16 @@ export async function replMain(flags: CliFlags) {
           continue;
         }
         case "mcp": {
-          const { mcpStatus, mcpServerSpecs } = await import("./mcp.ts");
+          const { mcpStatus, mcpServerSpecs, reloadMcp } = await import("./mcp.ts");
+          if (rest[0] === "reload") {
+            console.log(dim("reloading MCP servers…"));
+            await reloadMcp(config, (m) => console.log(yellow(`⚠ ${m}`)));
+            clearPromptSnapshots(session.id);
+            const st = mcpStatus();
+            const ok = st.filter((s) => s.ok).length;
+            console.log(dim(`MCP reload done · ${ok}/${st.length} up — tool schemas changed (provider cache miss expected)`));
+            continue;
+          }
           await mcpReady;
           const st = mcpStatus();
           if (!st.length) {
@@ -1030,6 +1282,7 @@ export async function replMain(flags: CliFlags) {
               console.log(dim(`   ${t.canonical}${t.readOnly ? " (ro)" : ""} — ${t.description.replace(/\s+/g, " ").slice(0, 70)}`));
             }
           }
+          console.log(dim("/mcp reload — reconnect and rebuild tool list"));
           continue;
         }
         case "undo": {
@@ -1053,7 +1306,20 @@ export async function replMain(flags: CliFlags) {
           continue;
         }
         case "diff": {
-          const n = Number(rest[0]) || 1;
+          const arg = rest[0];
+          const { isWorkingDiffArg, isBranchDiffArg, workingDiff, branchDiff, diffForPrompt } = await import("./git.ts");
+          if (isWorkingDiffArg(arg)) {
+            const d = workingDiff(config);
+            console.log(d ? diffForPrompt(d, 30_000) : dim("(clean working tree)"));
+            continue;
+          }
+          if (isBranchDiffArg(arg)) {
+            const r = branchDiff(config, arg!);
+            if (!r.ok) { console.log(dim(r.out)); continue; }
+            console.log(r.out ? diffForPrompt(r.out, 30_000) : dim(`(no diff vs ${arg})`));
+            continue;
+          }
+          const n = Number(arg) || 1;
           console.log(cp.diff(n));
           continue;
         }
@@ -1097,31 +1363,112 @@ export async function replMain(flags: CliFlags) {
         }
         case "compact": {
           if (session.history.length < 4) { console.log(dim("nothing worth compacting yet")); continue; }
-          await compactNow();
+          await compactNow("manual");
+          continue;
+        }
+        case "archives": {
+          const rows = listArchives(config.dataDir, 15);
+          if (!rows.length) { console.log(dim("no compaction archives yet")); continue; }
+          for (const a of rows) {
+            console.log(dim(`${a.at.slice(0, 19)}  ${a.oldId} → ${a.newId}  ${a.summaryChars}c  ${a.reason}`));
+          }
+          console.log(dim("restore with /restore-context <oldId|newId>"));
+          continue;
+        }
+        case "restore-context": {
+          const id = rest[0];
+          if (!id) { console.log(dim("usage: /restore-context <sessionId>  (see /archives)")); continue; }
+          const note = restoreContextNote(config.dataDir, id);
+          if (!note) { console.log(dim("session not found or empty")); continue; }
+          session.append({ role: "user", content: note });
+          session.append({ role: "assistant", content: "Restored context noted — ask me to use it." });
+          console.log(dim(`restored context from ${id} (${note.length} chars) into current session`));
+          continue;
+        }
+        case "rewind": {
+          const n = Math.max(1, Math.min(20, parseInt(rest[0] ?? "1", 10) || 1));
+          const dropped = session.rewind(n);
+          if (!dropped) { console.log(dim("nothing to rewind")); continue; }
+          console.log(dim(`rewound ${n} user turn(s) · dropped ${dropped} message(s) · workspace unchanged (/undo for files)`));
+          continue;
+        }
+        case "agent": {
+          const { getAgent, discoverAgents } = await import("./agents.ts");
+          const sub = rest[0]?.toLowerCase();
+          if (sub === "clear") {
+            if (savedAgent) {
+              config.toolFilter = savedAgent.toolFilter;
+              provider = savedAgent.provider;
+              savedAgent = null;
+              agentRoleBody = null;
+              clearPromptSnapshots(session.id);
+              console.log(dim("agent profile cleared"));
+            } else console.log(dim("no agent profile applied"));
+            continue;
+          }
+          if (!sub) {
+            const defs = discoverAgents(config);
+            if (!defs.length) { console.log(dim("no agent profiles — add .ap/agents/<name>.md")); continue; }
+            for (const a of defs) console.log(`${cyan(a.name)} ${dim(a.description.slice(0, 80))}`);
+            if (agentRoleBody) console.log(dim("(a profile is active — /agent clear to drop it)"));
+            continue;
+          }
+          const name = sub === "use" ? rest[1] : rest[0];
+          if (!name) { console.log(dim("usage: /agent <name> | /agent use <name> | /agent clear")); continue; }
+          const def = getAgent(config, name);
+          if (!def) {
+            const defs = discoverAgents(config);
+            console.log(dim(`unknown agent "${name}"${defs.length ? ` — available: ${defs.map((a) => a.name).join(", ")}` : ""}`));
+            continue;
+          }
+          if (!savedAgent) {
+            savedAgent = { toolFilter: config.toolFilter, provider };
+          }
+          config.toolFilter = def.tools?.length ? def.tools : undefined;
+          agentRoleBody = def.body?.trim() || null;
+          if (def.model) {
+            try {
+              const slash = def.model.indexOf("/");
+              const pfx = slash > 0 ? def.model.slice(0, slash) : "";
+              if (pfx && config.providers[pfx]) {
+                provider = resolveProvider(config, { ...flags, provider: pfx, model: def.model.slice(slash + 1) } as any);
+              } else {
+                provider = resolveProvider(config, { ...flags, model: def.model } as any);
+              }
+            } catch (e) {
+              console.log(dim(`model override failed: ${(e as Error).message}`));
+            }
+          }
+          clearPromptSnapshots(session.id);
+          console.log(dim(`agent → ${def.name}${def.tools?.length ? ` · tools ${def.tools.join(",")}` : ""}${def.model ? ` · ${def.model}` : ""} (prefix cache miss ok)`));
           continue;
         }
         case "commit": {
           const { gitState, workingDiff, diffForPrompt, cleanCommitMessage, createBranch, commitAll, slugifyBranch } =
             await import("./git.ts");
+          const flagsIn = new Set(rest.filter((a) => a.startsWith("--")));
+          const stagedOnly = flagsIn.has("--staged");
+          const sign = flagsIn.has("--sign");
+          const msgParts = rest.filter((a) => !a.startsWith("--"));
           const st = gitState(config);
           if (!st.repo) { console.log(dim("not a git repository")); continue; }
-          if (!st.dirty.length) { console.log(dim("nothing to commit — working tree clean")); continue; }
+          if (!stagedOnly && !st.dirty.length) { console.log(dim("nothing to commit — working tree clean")); continue; }
 
           // Protected branch: offer a feature branch instead of committing to it.
           if (st.protectedBranch) {
             console.log(dim(`on protected branch "${st.branch}" — AP won't commit here directly.`));
-            process.stdout.write(dim(`create branch ${slugifyBranch(rest.join(" ") || history[history.length - 2] || "work")} and commit there? [y/N] `));
+            process.stdout.write(dim(`create branch ${slugifyBranch(msgParts.join(" ") || history[history.length - 2] || "work")} and commit there? [y/N] `));
             const ans = await readKey(["y", "n"]);
             console.log(dim(ans === "y" ? "yes" : "no"));
             if (ans !== "y") { console.log(dim("aborted — switch branches yourself, then /commit")); continue; }
-            const name = slugifyBranch(rest.join(" ") || history[history.length - 2] || "work");
+            const name = slugifyBranch(msgParts.join(" ") || history[history.length - 2] || "work");
             const b = createBranch(config, name);
             if (!b.ok) { console.log(dim(`branch failed: ${b.out.slice(0, 200)}`)); continue; }
             console.log(dim(`branch → ${name}`));
           }
 
           // Message: explicit argument wins; otherwise the model drafts one.
-          let msg = rest.join(" ").trim();
+          let msg = msgParts.join(" ").trim();
           if (!msg) {
             spinner.start("drafting commit message…");
             try {
@@ -1148,8 +1495,98 @@ export async function replMain(flags: CliFlags) {
           const ok = await readKey(["y", "n"]);
           console.log(dim(ok === "y" ? "yes" : "no"));
           if (ok !== "y") { console.log(dim("aborted — nothing committed")); continue; }
-          const r = commitAll(config, msg);
-          console.log(dim(r.ok ? `committed ${r.out} (not pushed — push yourself when ready)` : `commit failed: ${r.out.slice(0, 300)}`));
+          const r = commitAll(config, msg, { stagedOnly, sign });
+          console.log(dim(r.ok ? `committed ${r.out}${sign ? " (signed)" : ""}${stagedOnly ? " (staged only)" : ""} (not pushed)` : `commit failed: ${r.out.slice(0, 300)}`));
+          continue;
+        }
+        case "pr": {
+          if (config.light) { console.log(dim("/pr is a full-profile feature")); continue; }
+          const { gitState, prPromptMaterial, createPullRequest, cleanCommitMessage } = await import("./git.ts");
+          const flagsIn = new Set(rest.filter((a) => a.startsWith("--") && !a.startsWith("--base")));
+          const draft = flagsIn.has("--draft");
+          let base: string | undefined;
+          const titleParts: string[] = [];
+          for (let i = 0; i < rest.length; i++) {
+            const a = rest[i]!;
+            if (a === "--base") { base = rest[++i]; continue; }
+            if (a === "--draft") continue;
+            if (a.startsWith("--")) continue;
+            titleParts.push(a);
+          }
+          const st = gitState(config);
+          if (!st.repo) { console.log(dim("not a git repository")); continue; }
+          if (st.protectedBranch) {
+            console.log(dim(`on protected branch "${st.branch}" — switch to an ap/… or feature branch first`));
+            continue;
+          }
+          const mat = prPromptMaterial(config, base);
+          let title = titleParts.join(" ").trim();
+          let body = "";
+          if (!title) {
+            spinner.start("drafting PR…");
+            try {
+              let draftText = "";
+              await streamChat(
+                provider,
+                [
+                  {
+                    role: "system",
+                    content:
+                      "Draft a GitHub pull request. First line: title under 72 chars (imperative). Then a blank line. Then a short markdown body with ## Summary (2-3 bullets) and ## Test plan (checklist). Output only the PR text.",
+                  },
+                  {
+                    role: "user",
+                    content: `Branch ${mat.head} → ${mat.base}\n\nCommits:\n${mat.commits || "(none)"}\n\nDiff:\n${mat.diff || "(empty)"}`,
+                  },
+                ],
+                [], (d) => { draftText += d; }, undefined, undefined, undefined, config.streamIdleSeconds * 1000,
+              );
+              const lines = draftText.trim().split(/\r?\n/);
+              title = cleanCommitMessage(lines[0] ?? "").split("\n")[0] ?? "";
+              body = lines.slice(1).join("\n").replace(/^\s*\n/, "").trim();
+            } catch (e) {
+              console.log(dim(`draft failed: ${(e as Error).message}`));
+            } finally { spinner.stop(); }
+          }
+          if (!title) { console.log(dim("no title — /pr <title> or let the model draft when a provider is configured")); continue; }
+          if (!body) body = `## Summary\n- ${title}\n\n## Test plan\n- [ ] verified locally`;
+          console.log(dim(`${mat.head} → ${mat.base}${draft ? " (draft)" : ""}`));
+          console.log(`  ${title}`);
+          for (const l of body.split("\n").slice(0, 12)) console.log(l ? `  ${l}` : "");
+          process.stdout.write(dim("create this PR? [y/N] "));
+          const ok = await readKey(["y", "n"]);
+          console.log(dim(ok === "y" ? "yes" : "no"));
+          if (ok !== "y") { console.log(dim("aborted — nothing created")); continue; }
+          const r = createPullRequest(config, { title, body, base: mat.base, draft });
+          console.log(dim(r.ok ? r.out : `pr failed: ${r.out.slice(0, 400)}`));
+          continue;
+        }
+        case "spawn": {
+          if (config.light) { console.log(dim("/spawn is a full-profile feature")); continue; }
+          const task = rest.join(" ").trim();
+          if (!task) { console.log(dim("usage: /spawn <task> — detaches ap run in tmux (unix)")); continue; }
+          const { tmuxSpawn, tmuxAvailable, tmuxMissingHint } = await import("./tmux.ts");
+          if (!tmuxAvailable()) { console.log(dim(tmuxMissingHint())); continue; }
+          const r = tmuxSpawn(config, task);
+          console.log(dim(r.ok ? r.out : `spawn failed: ${r.out}`));
+          continue;
+        }
+        case "tmux": {
+          if (config.light) { console.log(dim("/tmux is a full-profile feature")); continue; }
+          const { tmuxList, tmuxLayout, tmuxCapture, tmuxAvailable, tmuxMissingHint } = await import("./tmux.ts");
+          if (!tmuxAvailable()) { console.log(dim(tmuxMissingHint())); continue; }
+          const sub = rest[0] ?? "list";
+          if (sub === "layout") {
+            const r = tmuxLayout(config);
+            console.log(dim(r.ok ? r.out : r.out));
+          } else if (sub === "capture") {
+            if (!rest[1]) { console.log(dim("usage: /tmux capture <session> [lines]")); continue; }
+            const r = tmuxCapture(rest[1], Number(rest[2]) || 80);
+            console.log(r.ok ? r.out : dim(r.out));
+          } else {
+            const r = tmuxList();
+            console.log(r.ok ? r.out : dim(r.out));
+          }
           continue;
         }
         case "share": {
@@ -1206,6 +1643,17 @@ export async function replMain(flags: CliFlags) {
         userText = `${taskNotes.map((n) => `<task-result>\n${n}\n</task-result>`).join("\n")}\n\n${userText}`;
         console.log(dim(`  folded ${taskNotes.length} background task result(s) into this turn`));
       }
+      const steerNotes = drainSteerNotes();
+      if (steerNotes.length) {
+        userText = `${steerNotes.map((n) => `<steer>\n${n}\n</steer>`).join("\n")}\n\n${userText}`;
+        console.log(dim(`  folded ${steerNotes.length} steer note(s) into this turn`));
+      }
+      const { drainChannelNotes } = await import("./channels.ts");
+      const chNotes = drainChannelNotes();
+      if (chNotes.length) {
+        userText = `${chNotes.join("\n")}\n\n${userText}`;
+        console.log(dim(`  folded ${chNotes.length} channel note(s) into this turn`));
+      }
     }
 
     if (planArmed && lastPlan && config.mode === "code") {
@@ -1220,16 +1668,23 @@ export async function replMain(flags: CliFlags) {
     const compactR = new TurnRenderer(false, planMode);
     fullBuf = ""; compactBuf = ""; printedBuf = "";
 
-    const active = new Map<string, string>();
+    activeTools = new Map();
     const totals = { prompt: 0, cached: 0, completion: 0, steps: 0 };
     const t0 = performance.now();
     turnT0 = t0;
     turnOut = 0;
+    steering = false;
+    steerDraft = "";
 
-    const spinnerLabel = () =>
-      active.size === 0 ? "thinking" :
-      active.size === 1 ? [...active.values()][0]! :
-      `${active.size} tools running`;
+    const spinnerLabel = () => {
+      if (activeTools.size === 0) return "thinking";
+      if (activeTools.size === 1) {
+        const t = [...activeTools.values()][0]!;
+        const ts = ((performance.now() - t.t0) / 1000).toFixed(1);
+        return `${t.label} ${ts}s`;
+      }
+      return `${activeTools.size} tools running`;
+    };
 
     const writeBoth = (s: string) => {
       fullBuf += s; compactBuf += s;
@@ -1263,15 +1718,20 @@ export async function replMain(flags: CliFlags) {
         if (ctrl?.signal.aborted) return false;
         if (sessionAllows.has(key)) return true;
         spinner.stop();
-        const sbHint = hinted.has("sandbox") ? "" : dim(" · /sandbox shows the rules");
-        hinted.add("sandbox");
-        writeBoth(`  ${yellow("?")} ${req.action}: ${req.detail} ${dim("— allow? [y/N/a=always]")}${sbHint} `);
-        const ans = await readPermitKey();
-        writeBoth(dim(ans === "a" ? "always\n" : ans === "y" ? "yes\n" : "no\n"));
-        if (ans === "a") { sessionAllows.add(key); return true; }
-        return ans === "y";
+        permitBusy = true;
+        try {
+          const sbHint = hinted.has("sandbox") ? "" : dim(" · /sandbox shows the rules");
+          hinted.add("sandbox");
+          writeBoth(`  ${yellow("?")} ${req.action}: ${req.detail} ${dim("— allow? [y/N/a=always]")}${sbHint} `);
+          const ans = await readPermitKey();
+          writeBoth(dim(ans === "a" ? "always\n" : ans === "y" ? "yes\n" : "no\n"));
+          if (ans === "a") { sessionAllows.add(key); return true; }
+          return ans === "y";
+        } finally {
+          permitBusy = false;
+        }
       });
-      permitChain = result.catch(() => {});
+      permitChain = result.catch(() => { permitBusy = false; });
       return result;
     };
 
@@ -1282,10 +1742,10 @@ export async function replMain(flags: CliFlags) {
       let label: string | undefined;
       if (e.type === "tool_start") {
         label = toolLabel(e.name, e.args);
-        active.set(e.id, label);
+        activeTools.set(e.id, { label, t0: performance.now() });
       } else if (e.type === "tool_end") {
-        label = active.get(e.id) ?? e.name;
-        active.delete(e.id);
+        label = activeTools.get(e.id)?.label ?? e.name;
+        activeTools.delete(e.id);
         if (!e.error && getTool(e.name)?.readOnly === false) turnMutated = true;
       } else if (e.type === "turn_end") {
         totals.steps++;
@@ -1300,8 +1760,9 @@ export async function replMain(flags: CliFlags) {
         }
       }
 
-      const fullChunk = fullR.feed(e, label);
-      const compactChunk = compactR.feed(e, label);
+      const hideReason = config.showReasoning === "off";
+      const fullChunk = (e.type === "reasoning" && hideReason) ? "" : fullR.feed(e, label);
+      const compactChunk = (e.type === "reasoning" && hideReason) ? "" : compactR.feed(e, label);
       fullBuf += fullChunk;
       compactBuf += compactChunk;
       const live = verbose ? fullChunk : compactChunk;
@@ -1342,6 +1803,9 @@ export async function replMain(flags: CliFlags) {
       finalText = await runTurn(config, provider, session, userText, emit, ctrl.signal, {
         permit,
         extra: effort ? { reasoning_effort: effort } : undefined,
+        systemOverride: agentRoleBody
+          ? `${buildSystemPrompt(config)}\n\nRole — you are acting as a named agent:\n${agentRoleBody}`
+          : undefined,
       });
     } catch {
       // error already emitted
@@ -1365,8 +1829,12 @@ export async function replMain(flags: CliFlags) {
       }
       const secs = ((performance.now() - t0) / 1000).toFixed(1);
       const cached = totals.cached ? ` (${totals.cached} cached)` : "";
+      const hit = totals.cached && totals.prompt
+        ? ` · cache ${Math.min(100, Math.round((totals.cached / totals.prompt) * 100))}%`
+        : "";
       // Context drift belongs on the line people already read after each turn.
       let ctxNote = "";
+      let costNote = "";
       try {
         let chars = buildSystemPrompt(config).length;
         for (const m of session.history) chars += JSON.stringify(m).length;
@@ -1377,7 +1845,21 @@ export async function replMain(flags: CliFlags) {
           ctxNote += " — /compact frees context";
         }
       } catch {}
-      writeBoth(dim(`\n${totals.steps} step${totals.steps === 1 ? "" : "s"} · ↑${totals.prompt}${cached} ↓${totals.completion} · ${secs}s${ctxNote}\n`));
+      if (pricing && (totals.prompt || totals.completion)) {
+        const cachedTok = totals.cached;
+        const usd =
+          ((totals.prompt - cachedTok) * pricing.input +
+            cachedTok * (pricing.cacheRead ?? pricing.input) +
+            totals.completion * pricing.output) / 1e6;
+        if (usd > 0) {
+          costNote = usd < 0.01 ? ` · ~$${usd.toFixed(4)}` : usd < 1 ? ` · ~$${usd.toFixed(3)}` : ` · ~$${usd.toFixed(2)}`;
+        }
+      }
+      writeBoth(dim(`\n${totals.steps} step${totals.steps === 1 ? "" : "s"} · ↑${totals.prompt}${cached}${hit} ↓${totals.completion} · ${secs}s${costNote}${ctxNote}\n`));
+      if (pendingSteerCount() && !hinted.has("steer-pending")) {
+        hinted.add("steer-pending");
+        writeBoth(dim(`  ${pendingSteerCount()} steer note(s) waiting — will fold into your next message\n`));
+      }
     }
 
     if (turnMutated && cp.available()) {
@@ -1412,7 +1894,7 @@ export async function replMain(flags: CliFlags) {
         for (const m of session.history) chars += JSON.stringify(m).length;
         if (chars >= config.contextBudgetChars * 0.85) {
           console.log(dim(`context ${Math.round((chars / config.contextBudgetChars) * 100)}% of budget — auto-compacting ("autoCompact": "off" disables)`));
-          await compactNow();
+          await compactNow("auto");
         }
       } catch {}
     }

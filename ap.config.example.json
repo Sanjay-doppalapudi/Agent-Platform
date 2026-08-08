@@ -33,6 +33,9 @@
   "redactEnv": true,
   "shell": "auto",
   "parallelPolicy": "safe",
+  "git": {
+    "autoBranch": false
+  },
   "ignore": [],
   "hooks": {},
   "mcpServers": {},

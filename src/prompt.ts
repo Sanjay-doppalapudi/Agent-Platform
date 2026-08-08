@@ -1,30 +1,14 @@
 // System prompt builder. Byte-stable per (cwd, shell, HARNESS.md content) —
 // no dates, no dynamic ordering — so provider-side prefix caching hits from
 // turn 2 onward. Target < 2K tokens including tool schemas.
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Config } from "./config.ts";
 import { shellPrefix } from "./tools/bash.ts";
 import { agentsPromptBlock, discoverAgents } from "./agents.ts";
 import { discoverSkills, skillsPromptBlock } from "./skills.ts";
-
-const MEMORY_CHAR_CAP = 2000;
-
-/** Concatenated saved memories, capped. */
-function readMemories(memDir: string): string {
-  let out = "";
-  try {
-    for (const f of readdirSync(memDir).sort()) {
-      if (!f.endsWith(".md")) continue;
-      out += readFileSync(join(memDir, f), "utf8").trim() + "\n---\n";
-      if (out.length > MEMORY_CHAR_CAP) {
-        return out.slice(0, MEMORY_CHAR_CAP) + "\n[more memories truncated]";
-      }
-    }
-  } catch {}
-  return out;
-}
+import { legacyMemoryDir, readMemories, repoMemoryDir } from "./memory.ts";
 
 // Skills are snapshotted per session for the same cache-stability reason.
 const skillSnapshots = new Map<string, string>();
@@ -58,14 +42,35 @@ function agentsForSession(config: Config): string {
 // whole session, so the provider's prefix cache is never invalidated.
 const memorySnapshots = new Map<string, string>();
 
-function memoriesForSession(memDir: string, sessionKey: string): string {
+function memoriesForSession(memDir: string, legacyDir: string, sessionKey: string): string {
   const key = `${memDir}|${sessionKey}`;
   let snap = memorySnapshots.get(key);
   if (snap === undefined) {
-    snap = readMemories(memDir);
+    snap = readMemories(memDir, legacyDir);
     memorySnapshots.set(key, snap);
   }
   return snap;
+}
+
+/** Drop session-scoped memory snapshots (e.g. after /mcp reload style ops). */
+export function clearMemorySnapshots(sessionKey?: string) {
+  if (!sessionKey) { memorySnapshots.clear(); return; }
+  for (const k of [...memorySnapshots.keys()]) {
+    if (k.endsWith(`|${sessionKey}`)) memorySnapshots.delete(k);
+  }
+}
+
+/** Drop skill/agent prompt snapshots for a session (or all). */
+export function clearPromptSnapshots(sessionKey?: string) {
+  const clear = (m: Map<string, string>) => {
+    if (!sessionKey) { m.clear(); return; }
+    for (const k of [...m.keys()]) {
+      if (k.endsWith(`|${sessionKey}`) || k.includes(`|${sessionKey}`)) m.delete(k);
+    }
+  };
+  clear(skillSnapshots);
+  clear(agentSnapshots);
+  clearMemorySnapshots(sessionKey);
 }
 
 export function buildSystemPrompt(config: Config): string {
@@ -98,6 +103,7 @@ Rules:
 
   if (!config.light) {
     prompt += `
+- Prefer repomap once to orient in an unfamiliar tree before blind grep.
 - Use the agent tool to delegate independent subtasks in parallel (background:true returns immediately and reports back on a later turn); use todo to track multi-step work; use websearch to find web pages and fetch to read them. Answer questions about current events by searching, never from memory.
 - Use the artifact tool when the user wants a report, dashboard or diagram to look at: it saves one self-contained HTML page (inline CSS/JS only — remote resources are blocked).
 - "Workflow" means an AP workflow, not a script in another language: write .ap/workflows/<name>.ts exporting \`export default async function ({ agent, parallel, log, args }) { … }\`, where agent(task, {schema?}) runs a subagent and parallel([...thunks]) runs them concurrently. The user runs it with \`ap flow <name>\` or /flow. Never hand-roll a runner in Python/Node for this.`;
@@ -110,11 +116,12 @@ PLAN MODE: You have read-only tools. Explore the codebase, then produce a concre
   }
 
   if (!config.light) {
-    const memDir = join(config.dataDir, "memory");
+    const memDir = repoMemoryDir(config.dataDir, config.cwd);
+    const legacy = legacyMemoryDir(config.dataDir);
     prompt += `
 
 Memory: when the user corrects you or wants something different from what you did, save it — write ${memDir}\\<short-slug>.md with exactly three lines: "Title: …", "User wanted: …", "Why (guess): …". Also save one after cracking a tricky problem whose approach will recur (Title = the technique). Consult the saved memories below before repeating a choice the user disliked; if one keeps applying, promote it into a custom command (.ap/commands/<name>.md) so it becomes reusable structure.`;
-    const memories = memoriesForSession(memDir, config.sessionId ?? "");
+    const memories = memoriesForSession(memDir, legacy, config.sessionId ?? "");
     if (memories) prompt += `\n\nSaved user preferences:\n${memories}`;
 
     prompt += skillsForSession(config);
@@ -134,6 +141,21 @@ Memory: when the user corrects you or wants something different from what you di
         if (extra) prompt += `\n\nProject notes:\n${extra}`;
       } catch {}
       break;
+    }
+  }
+
+  if (!config.light) {
+    const decisionsPath = join(config.cwd, ".ap", "DECISIONS.md");
+    if (existsSync(decisionsPath)) {
+      try {
+        let d = readFileSync(decisionsPath, "utf8").trim();
+        if (d) {
+          if (d.length > 2000) d = d.slice(-2000);
+          prompt += `\n\nProject decisions (architectural choices — append new ones as ## YYYY-MM-DD — Title entries when locked; style prefs go in memory/ instead):\n${d}`;
+        }
+      } catch {}
+    } else {
+      prompt += `\n\nProject decisions: when an architectural choice is locked, append it to .ap/DECISIONS.md as \`## YYYY-MM-DD — Title\` plus a short body. Prefer that file over memory/ for design rationale.`;
     }
   }
   return prompt;

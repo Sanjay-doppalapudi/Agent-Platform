@@ -56,6 +56,15 @@ export interface Config {
   checkpoints: "on" | "off";
   /** REPL auto-compaction at 85% of contextBudgetChars (full profile only). */
   autoCompact: "on" | "off";
+  /** After compact, extract 0–3 memory cards into the repo-keyed memory dir. */
+  autoMemory: "on" | "off";
+  /** Soft ms before a blocking MCP tool call backgrounds onto the task queue.
+   *  0 = never auto-background. Default 30000. Hard timeout remains 120s. */
+  mcpAutoBackgroundMs?: number;
+  /** Show model reasoning/thinking in the compact REPL view (default on). */
+  showReasoning?: "on" | "off";
+  /** Force ask before every edit/write even when permissions are yolo. */
+  confirmEdits?: boolean;
   /** Default reasoning effort sent as `reasoning_effort` (models that don't
    *  support it may ignore or reject it — /effort checks models.dev). */
   reasoningEffort?: "minimal" | "low" | "medium" | "high";
@@ -83,6 +92,17 @@ export interface Config {
   /** Programmatic tool whitelist (named agent profiles) — never from JSON.
    *  Constant per process, so schema bytes stay stable for caching. */
   toolFilter?: string[];
+  /** Optional model for plan mode ("provider/model" or bare model id).
+   *  Swapped into the live provider on /plan; never enters the system prompt. */
+  planModel?: string;
+  /** Optional model for code mode. Swapped on /code (and as the default). */
+  codeModel?: string;
+  /** Real-git hygiene (distinct from shadow checkpoints). */
+  git?: {
+    /** On first mutating tool call while on a protected branch, create and
+     *  switch to `ap/<slug>` so main/master stay untouched. Default off. */
+    autoBranch?: boolean;
+  };
 }
 
 export interface ResolvedProvider {
@@ -110,6 +130,7 @@ const DEFAULTS: Omit<Config, "provider" | "providers" | "cwd"> = {
   light: false,
   checkpoints: "on",
   autoCompact: "on",
+  autoMemory: "on",
   streamIdleSeconds: 90,
   maxIterations: 40,
   contextBudgetChars: 400_000,
@@ -207,4 +228,52 @@ export function resolveProvider(config: Config, flags: CliFlags): ResolvedProvid
     cacheControl: entry.cacheControl ?? false,
     headers: entry.headers ?? {},
   };
+}
+
+/**
+ * Resolve a "provider/model" or bare model id against config, keeping the
+ * current provider when the prefix is unknown (model ids often contain
+ * slashes — same rule as named-agent overrides in run.ts).
+ *
+ * Does not throw on a missing API key: the REPL/mode switch still updates
+ * name+model; the next API call surfaces the auth error via resolveProvider.
+ */
+export function resolveModelRef(config: Config, ref: string, current: ResolvedProvider): ResolvedProvider {
+  const slash = ref.indexOf("/");
+  if (slash <= 0) return { ...current, model: ref };
+  const pfx = ref.slice(0, slash);
+  const modelId = ref.slice(slash + 1);
+  if (!modelId) return { ...current, model: ref };
+  if (pfx === current.name) return { ...current, model: modelId };
+  const entry = config.providers[pfx];
+  if (entry) {
+    let apiKey =
+      entry.apiKey ??
+      (entry.apiKeyEnv ? process.env[entry.apiKeyEnv] : undefined) ??
+      "";
+    if (!apiKey && config.dataDir) {
+      try { apiKey = getKey(config.dataDir, pfx) ?? ""; } catch { /* leave empty */ }
+    }
+    return {
+      name: pfx,
+      baseUrl: entry.baseUrl.replace(/\/+$/, ""),
+      apiKey,
+      model: modelId,
+      cacheControl: entry.cacheControl ?? false,
+      headers: entry.headers ?? {},
+    };
+  }
+  // Bare "org/model" id on the current provider (OpenRouter-style).
+  return { ...current, model: ref };
+}
+
+/** Apply planModel/codeModel for the given mode. No-op when unset. */
+export function providerForMode(
+  config: Config,
+  mode: "plan" | "code",
+  current: ResolvedProvider,
+): ResolvedProvider {
+  const ref = mode === "plan" ? config.planModel : config.codeModel;
+  if (!ref?.trim()) return current;
+  return resolveModelRef(config, ref.trim(), current);
 }

@@ -7,6 +7,7 @@
 import { ensureAllowed, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
 import { runSubagent } from "./subagent.ts";
 import { auditTask, finishTask, registerTask } from "../tasks.ts";
+import { postChannel, safeChannelId } from "../channels.ts";
 import type { ToolCtx } from "./index.ts";
 
 export interface SubagentInfo {
@@ -62,7 +63,7 @@ async function profileArgsFor(name: string | undefined, ctx: ToolCtx): Promise<s
 }
 
 export async function agentTool(
-  args: { task: string; name?: string; cwd?: string; timeout?: number; background?: boolean },
+  args: { task: string; name?: string; cwd?: string; timeout?: number; background?: boolean; channel?: string },
   ctx: ToolCtx,
 ): Promise<string> {
   if (typeof args.task !== "string" || !args.task.trim()) {
@@ -75,7 +76,20 @@ export async function agentTool(
   if (args.cwd) await ensureAllowed(cwd, ctx, "delegate a subagent outside the workspace");
   const timeoutMs = Math.min((args.timeout ?? 300) * 1000, 900_000);
   const extraArgs = await profileArgsFor(args.name, ctx);
+  const channel = args.channel ? safeChannelId(String(args.channel)) : null;
+  if (args.channel && !channel) throw new ToolError(`invalid channel id "${args.channel}" — use [\\w-]{1,64}`);
+  const from = args.name ? `agent:${args.name}` : "agent";
+  let taskText = args.task;
+  if (channel) {
+    taskText =
+      `[channel:${channel}] Post brief progress or findings by mentioning them clearly in your final answer — the parent reads your result onto this channel.\n\n` +
+      args.task;
+  }
   const label = `${args.name ? `[${args.name}] ` : ""}${args.task.replace(/\s+/g, " ")}`.slice(0, 100);
+
+  const publish = (text: string) => {
+    if (channel) postChannel(ctx.config.dataDir, channel, from, text.slice(0, 2000));
+  };
 
   if (args.background) {
     // Detached: the task gets its OWN abort controller — the turn's ctrl+c
@@ -89,7 +103,7 @@ export async function agentTool(
     auditTask(ctx.config, t, "start");
     ctx.subline?.(`◇ task #${t.id} started in background: ${label.slice(0, 70)}`);
     void runSubagent({
-      task: args.task, cwd, timeoutMs, extraArgs,
+      task: taskText, cwd, timeoutMs, extraArgs,
       signal: t.ctrl.signal,
       onStep: () => { t.steps++; info.steps++; },
       onOutput: (_kind, delta) => appendLive(info, delta),
@@ -101,6 +115,7 @@ export async function agentTool(
         : failed
           ? truncateMiddle(r.errorMsg || r.stderrTail.trim() || `exit code ${r.exitCode}, no output`, 600)
           : truncateMiddle(r.text || "(subagent produced no output)", 20_000);
+      if (!failed && !r.killed) publish(result);
       finishTask(t, status, result);
       info.status = status;
       info.result = result.slice(0, 4000);
@@ -113,7 +128,7 @@ export async function agentTool(
       info.endedAt = Date.now();
       auditTask(ctx.config, t, "end");
     });
-    return `started background task #${t.id} — the result will arrive with the next turn (/tasks to inspect)`;
+    return `started background task #${t.id}${channel ? ` on channel ${channel}` : ""} — the result will arrive with the next turn (/tasks to inspect)`;
   }
 
   const info: SubagentInfo = {
@@ -124,7 +139,7 @@ export async function agentTool(
   ctx.subline?.(`◇ agent #${info.id} started: ${info.task.slice(0, 70)}`);
 
   const r = await runSubagent({
-    task: args.task, cwd, timeoutMs, extraArgs,
+    task: taskText, cwd, timeoutMs, extraArgs,
     signal: ctx.signal,
     onStep: (line) => { info.steps++; ctx.subline?.(line); },
     onOutput: (_kind, delta) => appendLive(info, delta),
@@ -151,6 +166,7 @@ export async function agentTool(
   }
   info.status = "done";
   info.result = truncateMiddle(r.text || "(subagent produced no output)", 4000);
+  publish(info.result);
   ctx.subline?.(`◇ agent #${info.id} done · ${info.steps} steps · ${secs}s`);
   return truncateMiddle(r.text || "(subagent produced no output)", 20_000);
 }

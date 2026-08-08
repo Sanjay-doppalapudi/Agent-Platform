@@ -38,6 +38,8 @@ const SLASH_COMMANDS = [
   { name: "undo", description: "Restore the previous checkpoint" },
   { name: "diff", description: "Diff of the last checkpoint (+ pending changes)" },
   { name: "checkpoints", description: "List workspace checkpoints" },
+  { name: "commit", description: "Commit with a drafted message (never pushes)", input: { hint: "[--staged] [--sign] [message]" } },
+  { name: "pr", description: "Create a GitHub PR via gh", input: { hint: "[--draft] [--base branch] [title]" } },
   { name: "mcp", description: "List MCP servers and their tools" },
   { name: "skills", description: "List available SKILL.md packs" },
   { name: "context", description: "Show session context usage" },
