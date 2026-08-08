@@ -1,4 +1,6 @@
-import { allIgnores, ensureReadable, privateExcludeGlobs, redactGrepLine, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
+import { allIgnores, ensureReadable, privateExcludeGlobs, redactGrepLine, requireRg, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
+import { dirname } from "node:path";
+import { statSync } from "node:fs";
 import type { ToolCtx } from "./index.ts";
 
 const MAX_BYTES = 30_000;
@@ -15,17 +17,24 @@ export async function grepTool(
   },
   ctx: ToolCtx,
 ): Promise<string> {
-  if (!Bun.which("rg")) {
-    throw new ToolError("ripgrep (rg) not found on PATH — install from https://github.com/BurntSushi/ripgrep");
-  }
-  const root = args.path ? resolvePath(args.path, ctx.cwd) : ctx.cwd;
-  if (args.path) await ensureReadable(root, ctx);
+  const rg = requireRg();
+  const target = args.path ? resolvePath(args.path, ctx.cwd) : ctx.cwd;
+  if (args.path) await ensureReadable(target, ctx);
+  // A file path must not be used as spawn cwd (Windows: uv_spawn ENOENT).
+  let cwd = target;
+  let searchPath = ".";
+  try {
+    if (statSync(target).isFile()) {
+      cwd = dirname(target);
+      searchPath = target; // absolute — rg accepts it with any cwd
+    }
+  } catch { /* missing path → let rg report */ }
   const mode = args.mode ?? "content";
 
   const rgArgs = ["--no-messages", "--hidden"];
   for (const ig of allIgnores(ctx.config)) rgArgs.push("-g", `!**/${ig}/**`, "-g", `!${ig}/**`);
   // Gating the root is not enough: rg must never WALK INTO private data.
-  if (ctx.config.sandbox !== "off") rgArgs.push(...privateExcludeGlobs(ctx.config, root));
+  if (ctx.config.sandbox !== "off") rgArgs.push(...privateExcludeGlobs(ctx.config, cwd));
   if (args.glob) rgArgs.push("-g", args.glob);
   if (args.ignoreCase) rgArgs.push("-i");
   switch (mode) {
@@ -35,9 +44,9 @@ export async function grepTool(
       rgArgs.push("-n", "-m", String(MAX_MATCHES));
       if (args.context) rgArgs.push("-C", String(Math.min(args.context, 10)));
   }
-  rgArgs.push("-e", args.pattern, ".");
+  rgArgs.push("-e", args.pattern, searchPath);
 
-  const proc = Bun.spawn(["rg", ...rgArgs], { cwd: root, stdout: "pipe", stderr: "pipe" });
+  const proc = Bun.spawn([rg, ...rgArgs], { cwd, stdout: "pipe", stderr: "pipe" });
   const [out, err, code] = await Promise.all([
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),

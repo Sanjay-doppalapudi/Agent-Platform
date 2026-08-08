@@ -23,6 +23,7 @@ import { shellPrefix } from "./tools/bash.ts";
 import { MdRenderer } from "./md.ts";
 import { errorHint, renderDiff, toolLabel, toolSummary } from "./ui.ts";
 import { Session } from "./session.ts";
+import { compactSession, loopCompactSeed } from "./compact.ts";
 import type { CliFlags } from "./index.ts";
 
 const VERIFY_PROMPT = `[loop verifier] STOP working and audit. Re-read the ORIGINAL GOAL at the top of this session. For each requirement, verify it concretely NOW using ONLY the read/grep/glob tools — do not use bash, do not trust your memory of earlier turns. Then reply with exactly LOOP_DONE if every requirement is met, or a terse numbered list of what is still missing or broken, or LOOP_BLOCKED: <reason> if the goal does not apply to this directory at all.`;
@@ -168,14 +169,18 @@ export async function loopMain(flags: CliFlags) {
     status(`loop ${iter} — compacting context`);
     const summary = await turn(COMPACT_PROMPT);
     if (ctrl.signal.aborted) return pending; // bailIfAborted handles the exit
-    session = Session.create(config.dataDir, {
-      cwd: config.cwd,
-      model: provider.model,
-      at: new Date().toISOString(),
-      checkpointId: cpSessionId, // keep the /undo trail reachable
+    const result = await compactSession({
+      session,
+      config,
+      provider,
+      checkpointId: cpSessionId,
+      reason: "loop",
+      summaryText: summary.text.trim(),
+      seedMode: "loop",
     });
+    session = result.session;
     config.sessionId = session.id;
-    return `[loop mode] GOAL:\n${goal}\n\nProgress handoff from the previous context:\n${summary.text.trim()}\n\n${pending}`;
+    return loopCompactSeed(goal!, result.summary, pending);
   };
 
   let nextMsg = `[loop mode] GOAL:\n${goal}\n\nWork until this goal is FULLY complete. Claims are not enough — an auditor re-verifies everything, and any verification command must pass. You will be re-invoked until it does.\nIf the goal does not apply to this directory (e.g. it mentions tests and none exist here), do NOT hunt for meaning in other folders — reply LOOP_BLOCKED: <one-line reason> and stop.`;
@@ -289,9 +294,22 @@ export async function loopMain(flags: CliFlags) {
       if (historySize() > budget) {
         status(`loop ${iter} — compacting context`);
         const summary = await turn(COMPACT_PROMPT);
-        session = Session.create(config.dataDir, { cwd: config.cwd, model: provider.model, at: new Date().toISOString() });
+        const result = await compactSession({
+          session,
+          config,
+          provider,
+          checkpointId: cpSessionId,
+          reason: "loop",
+          summaryText: summary.text.trim(),
+          seedMode: "loop",
+        });
+        session = result.session;
         config.sessionId = session.id;
-        nextMsg = `[loop mode] GOAL:\n${goal}\n\nProgress handoff from the previous context:\n${summary.text.trim()}\n\nContinue until the goal is FULLY complete; an auditor re-verifies everything.`;
+        nextMsg = loopCompactSeed(
+          goal!,
+          result.summary,
+          "Continue until the goal is FULLY complete; an auditor re-verifies everything.",
+        );
       }
     }
   } catch (e) {

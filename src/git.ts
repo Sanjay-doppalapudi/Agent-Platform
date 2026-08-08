@@ -113,15 +113,164 @@ export function workingDiff(config: Config): string {
   return out;
 }
 
+/**
+ * Diff against a base ref (branch/tag/commit). Prefers three-dot (merge-base)
+ * when the ref resolves; falls back to two-dot. Pure plumbing — callers cap.
+ */
+export function branchDiff(config: Config, base: string): { ok: boolean; out: string } {
+  const ref = base.trim();
+  if (!ref || /[\s;|&<>]/.test(ref)) return { ok: false, out: "invalid base ref" };
+  if (!git(config.cwd, ["rev-parse", "--git-dir"]).ok) {
+    return { ok: false, out: "not a git repository" };
+  }
+  // Resolve the ref first so typos don't produce an empty "ok" diff.
+  if (!git(config.cwd, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]).ok &&
+      !git(config.cwd, ["rev-parse", "--verify", "--quiet", ref]).ok) {
+    return { ok: false, out: `unknown ref: ${ref}` };
+  }
+  const three = git(config.cwd, ["diff", `${ref}...HEAD`]);
+  if (three.ok) return three;
+  return git(config.cwd, ["diff", `${ref}..HEAD`]);
+}
+
+/** True when `/diff` args mean "git working tree" rather than checkpoint N. */
+export function isWorkingDiffArg(arg: string | undefined): boolean {
+  if (!arg) return false;
+  const a = arg.toLowerCase();
+  return a === "git" || a === "working" || a === "--git" || a === "-g";
+}
+
+/** True when `/diff` args look like a branch/ref (not a checkpoint back-N). */
+export function isBranchDiffArg(arg: string | undefined): boolean {
+  if (!arg) return false;
+  if (isWorkingDiffArg(arg)) return false;
+  if (/^\d+$/.test(arg)) return false; // checkpoint back-count
+  // Reject shell metacharacters; allow branch-ish names and SHAs.
+  return /^[A-Za-z0-9._/@~^+-]+$/.test(arg);
+}
+
 export function createBranch(config: Config, name: string): { ok: boolean; out: string } {
   return git(config.cwd, ["switch", "-c", name]);
 }
 
+/** Per-process: only auto-branch once per cwd. */
+const autoBranched = new Set<string>();
+
+/**
+ * If `git.autoBranch` is on and we're on a protected branch, create
+ * `ap/<slug>` before the first mutation. Idempotent per cwd for the process.
+ * Returns the new branch name, or null when skipped/failed.
+ */
+export function maybeAutoBranch(
+  config: Config,
+  hint: string,
+  notify?: (msg: string) => void,
+): string | null {
+  if (config.light || !config.git?.autoBranch) return null;
+  const key = config.cwd;
+  if (autoBranched.has(key)) return null;
+  // Latch before any git I/O so parallel mutating tools don't race two creates.
+  autoBranched.add(key);
+  const st = gitState(config);
+  if (!st.repo || !st.protectedBranch) return null;
+  // Already on an ap/ branch somehow (rebased rename etc.) — leave it.
+  if (st.branch.startsWith("ap/")) return null;
+  const name = slugifyBranch(hint || config.sessionId || "work");
+  // If the branch already exists, switch to it instead of failing create.
+  let r = createBranch(config, name);
+  if (!r.ok) {
+    const sw = git(config.cwd, ["switch", name]);
+    if (sw.ok) r = sw;
+  }
+  if (r.ok) {
+    notify?.(`auto-branch → ${name} (git.autoBranch; protected "${st.branch}" left alone)`);
+    return name;
+  }
+  notify?.(`auto-branch failed (${name}): ${r.out.slice(0, 200)}`);
+  return null;
+}
+
+/** Reset auto-branch latch (tests). */
+export function resetAutoBranchLatch(): void {
+  autoBranched.clear();
+}
+
+/** Prefer upstream / origin/HEAD / main / master as PR base. */
+export function defaultPrBase(config: Config): string {
+  const upstream = git(config.cwd, ["rev-parse", "--abbrev-ref", "@{upstream}"]);
+  if (upstream.ok && upstream.out.includes("/")) {
+    // origin/main → main
+    return upstream.out.split("/").slice(1).join("/") || "main";
+  }
+  for (const cand of ["main", "master", "develop"]) {
+    if (git(config.cwd, ["rev-parse", "--verify", "--quiet", `origin/${cand}`]).ok ||
+        git(config.cwd, ["rev-parse", "--verify", "--quiet", cand]).ok) {
+      return cand;
+    }
+  }
+  return "main";
+}
+
+/** Build title + body for `gh pr create` from the branch diff. Pure text. */
+export function prPromptMaterial(config: Config, base?: string): { base: string; head: string; diff: string; commits: string } {
+  const st = gitState(config);
+  const b = (base?.trim() || defaultPrBase(config));
+  const diff = diffForPrompt(branchDiff(config, b).out || "", 10_000);
+  const commits = git(config.cwd, ["log", "--oneline", `${b}..HEAD`]).out.slice(0, 4000);
+  return { base: b, head: st.branch, diff, commits };
+}
+
+/** Run `gh pr create`. Never force-pushes. */
+export function createPullRequest(
+  config: Config,
+  opts: { title: string; body: string; base?: string; draft?: boolean },
+): { ok: boolean; out: string } {
+  if (!Bun.which("gh")) return { ok: false, out: "gh not found on PATH — install GitHub CLI" };
+  const st = gitState(config);
+  if (!st.repo) return { ok: false, out: "not a git repository" };
+  if (st.protectedBranch) {
+    return { ok: false, out: `on protected branch "${st.branch}" — switch to an ap/… or feature branch first` };
+  }
+  const base = opts.base?.trim() || defaultPrBase(config);
+  const args = [
+    "pr", "create",
+    "--title", opts.title.slice(0, 200),
+    "--body", opts.body.slice(0, 50_000),
+    "--base", base,
+    "--head", st.branch,
+  ];
+  if (opts.draft) args.push("--draft");
+  try {
+    const p = Bun.spawnSync(["gh", ...args], {
+      cwd: config.cwd,
+      stdout: "pipe",
+      stderr: "pipe",
+      env: process.env,
+    });
+    const out = ((p.stdout?.toString() ?? "") + (p.stderr?.toString() ?? "")).trim();
+    return { ok: p.exitCode === 0, out };
+  } catch (e) {
+    return { ok: false, out: (e as Error).message };
+  }
+}
+
 /** Stage everything and commit. Never pushes; never signs off for the user. */
-export function commitAll(config: Config, message: string): { ok: boolean; out: string } {
-  const add = git(config.cwd, ["add", "-A"]);
-  if (!add.ok) return add;
-  const c = git(config.cwd, ["commit", "-m", message]);
+export function commitAll(
+  config: Config,
+  message: string,
+  opts?: { stagedOnly?: boolean; sign?: boolean },
+): { ok: boolean; out: string } {
+  if (!opts?.stagedOnly) {
+    const add = git(config.cwd, ["add", "-A"]);
+    if (!add.ok) return add;
+  } else {
+    const st = git(config.cwd, ["diff", "--cached", "--quiet"]);
+    // exit 1 means there is a staged diff; exit 0 means empty
+    if (st.ok) return { ok: false, out: "nothing staged — stage files first, or omit --staged" };
+  }
+  const args = ["commit", "-m", message];
+  if (opts?.sign) args.splice(1, 0, "-S");
+  const c = git(config.cwd, args);
   if (!c.ok) return c;
   const hash = git(config.cwd, ["rev-parse", "--short", "HEAD"]).out;
   return { ok: true, out: hash };

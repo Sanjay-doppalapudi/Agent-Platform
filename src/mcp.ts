@@ -13,8 +13,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import type { Config, McpServerSpec } from "./config.ts";
-import { registerDynamicTools, type ToolDef } from "./tools/index.ts";
+import { clearDynamicTools, registerDynamicTools, type ToolDef } from "./tools/index.ts";
 import { ToolError, truncateMiddle } from "./tools/shared.ts";
+import { auditTask, finishTask, registerTask } from "./tasks.ts";
 
 interface JsonRpcMsg {
   jsonrpc: "2.0";
@@ -406,7 +407,7 @@ async function doInit(config: Config, warn: (msg: string) => void): Promise<void
         parameters: t.inputSchema && typeof t.inputSchema === "object" ? t.inputSchema : { type: "object", properties: {} },
         readOnly,
         fullOnly: true,
-        run: async (args, ctx) => truncateMiddle(await client.callTool(toolName, args, ctx.signal), RESULT_CAP_BYTES),
+        run: (args, ctx) => runMcpTool(client, toolName, args, ctx, config, name),
       });
       // Models say server.tool / server__tool / bare tool — accept all of them
       // (built-in names and aliases still win at resolution time).
@@ -420,4 +421,65 @@ async function doInit(config: Config, warn: (msg: string) => void): Promise<void
   }
   for (const k of Object.keys(aliases)) if (!aliases[k]) delete aliases[k];
   if (defs.length) registerDynamicTools(defs, aliases);
+}
+
+async function runMcpTool(
+  client: McpClient,
+  toolName: string,
+  args: any,
+  ctx: { signal: AbortSignal; subline?: (t: string) => void },
+  config: Config,
+  serverName: string,
+): Promise<string> {
+  const softMs = config.mcpAutoBackgroundMs ?? 30_000;
+  const ctrl = new AbortController();
+  const onTurnAbort = () => ctrl.abort();
+  ctx.signal.addEventListener("abort", onTurnAbort, { once: true });
+  const hardTimer = setTimeout(() => ctrl.abort(), CALL_TIMEOUT_MS);
+  const work = client.callTool(toolName, args, ctrl.signal).finally(() => {
+    clearTimeout(hardTimer);
+    ctx.signal.removeEventListener("abort", onTurnAbort);
+  });
+
+  if (softMs <= 0) {
+    return truncateMiddle(await work, RESULT_CAP_BYTES);
+  }
+
+  const winner = await Promise.race([
+    work.then((r) => ({ t: "ok" as const, r })),
+    new Promise<{ t: "soft" }>((res) => setTimeout(() => res({ t: "soft" }), softMs)),
+  ]);
+  if (winner.t === "ok") return truncateMiddle(winner.r, RESULT_CAP_BYTES);
+
+  // Soft timeout: keep the in-flight call, detach from turn abort, report via tasks.
+  ctx.signal.removeEventListener("abort", onTurnAbort);
+  const label = `[mcp ${serverName}] ${toolName}`;
+  const t = registerTask(label, CALL_TIMEOUT_MS);
+  ctx.subline?.(`◇ MCP ${toolName} backgrounded as task #${t.id}`);
+  auditTask(config, t, "start");
+  void work.then((r) => {
+    finishTask(t, "done", truncateMiddle(r, 20_000));
+    auditTask(config, t, "end");
+  }).catch((e) => {
+    const msg = String((e as Error).message ?? e);
+    finishTask(t, ctrl.signal.aborted ? "killed" : "error", msg.slice(0, 2000));
+    auditTask(config, t, "end");
+  });
+  return `backgrounded MCP tool ${toolName} as task #${t.id} — the result will arrive with the next turn (/tasks to inspect)`;
+}
+
+/** Reconnect MCP servers and rebuild dynamic tool schemas (cache miss). */
+export async function reloadMcp(config: Config, warn: (msg: string) => void): Promise<void> {
+  if (config.light) {
+    warn("mcp reload skipped in --light profile");
+    return;
+  }
+  for (const c of clients) {
+    try { c.close(); } catch {}
+  }
+  clients.length = 0;
+  statuses.length = 0;
+  clearDynamicTools();
+  initPromise = null;
+  await initMcp(config, warn);
 }

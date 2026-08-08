@@ -7,6 +7,7 @@ import { streamRouted } from "./router.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import type { Session } from "./session.ts";
 import { autoDenyPermit, execTool, getTool, isParallelSafe, permissionFor, resolveToolName, toolSchemasFor, type PermitFn } from "./tools/index.ts";
+import { maybeAutoBranch } from "./git.ts";
 import type { Usage } from "./stream.ts";
 
 export type AgentEvent =
@@ -57,7 +58,11 @@ function runHook(cmd: string, cwd: string, tool: string, argsJson: string): { ok
  * payload travels via env vars / request body — never shell interpolation. */
 const pendingLifecycle = new Set<Promise<unknown>>();
 
-function fireLifecycle(config: Config, name: "onDone" | "onError", payload: Record<string, unknown>) {
+export function fireLifecycle(
+  config: Config,
+  name: "onDone" | "onError" | "preCompact" | "postCompact",
+  payload: Record<string, unknown>,
+) {
   const spec = config.light ? undefined : config.hooks?.[name];
   if (!spec) return;
   const body = JSON.stringify({ event: name, ...payload });
@@ -220,7 +225,15 @@ export async function runTurn(
         // sandbox and bashGuard inside the tools still apply.
         let allowed = true;
         let denial = "denied by user";
-        const rule = permissionFor(config, canonical, tc.function.arguments);
+        let rule = permissionFor(config, canonical, tc.function.arguments);
+        // confirmEdits: always ask before write/edit even under yolo.
+        if (
+          config.confirmEdits &&
+          (canonical === "edit" || canonical === "write") &&
+          (rule === null || rule === "allow")
+        ) {
+          rule = "ask";
+        }
         if (rule === "deny") {
           allowed = false;
           denial = `blocked by permission config ("${canonical}": deny) — this tool/command is not permitted in this project`;
@@ -233,11 +246,18 @@ export async function runTurn(
         if (!allowed) {
           r = { output: denial, error: true };
         } else if (preHook) {
+          // Auto-branch before the first mutating tool touches the tree.
+          if (!getTool(canonical)?.readOnly) {
+            maybeAutoBranch(config, session.id, (m) => emit({ type: "warn", message: m }));
+          }
           const h = runHook(preHook, config.cwd, canonical, tc.function.arguments);
           r = h.ok
             ? await execTool(tc.function.name, tc.function.arguments, ctx)
             : { output: `blocked by ${HOOK_PRE[canonical]} hook:\n${h.output || "(no output)"}`, error: true };
         } else {
+          if (!getTool(canonical)?.readOnly) {
+            maybeAutoBranch(config, session.id, (m) => emit({ type: "warn", message: m }));
+          }
           r = await execTool(tc.function.name, tc.function.arguments, ctx);
         }
       }
@@ -277,7 +297,17 @@ export async function runTurn(
         return (c === "write" || c === "edit") && !results[i]!.error;
       });
       if (mutated) {
-        const h = runHook(afterEdit, config.cwd, "afterEdit", "{}");
+        const paths: string[] = [];
+        for (let i = 0; i < res.toolCalls.length; i++) {
+          const c = resolveToolName(res.toolCalls[i]!.function.name);
+          if ((c !== "write" && c !== "edit") || results[i]!.error) continue;
+          try {
+            const a = JSON.parse(res.toolCalls[i]!.function.arguments || "{}");
+            const p = a?.path ?? a?.file ?? a?.filename;
+            if (typeof p === "string" && p.trim()) paths.push(p.trim());
+          } catch {}
+        }
+        const h = runHook(afterEdit, config.cwd, "afterEdit", JSON.stringify({ paths }));
         if (!h.ok && h.output) {
           hookContinuations++;
           emit({ type: "warn", message: `afterEdit hook reported problems — asking the model to fix them` });

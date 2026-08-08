@@ -84,6 +84,34 @@ export interface Pricing { input: number; output: number; cacheRead?: number }
  * listing the same model id — prices for the same model rarely differ much,
  * and the result is labeled approximate everywhere it is shown.
  */
+/** USD estimate from token counts + pricing. Pure — safe for unit tests. */
+export function estimateUsd(
+  pricing: Pricing,
+  usage: { prompt: number; cached?: number; completion: number },
+): number {
+  const cached = usage.cached ?? 0;
+  const input = Math.max(0, usage.prompt - cached);
+  return (
+    (input * pricing.input +
+      cached * (pricing.cacheRead ?? pricing.input) +
+      usage.completion * pricing.output) / 1e6
+  );
+}
+
+/** Format a USD estimate for the status /context lines. */
+export function formatUsd(usd: number): string {
+  if (usd <= 0) return "$0";
+  if (usd < 0.01) return `~$${usd.toFixed(4)}`;
+  if (usd < 1) return `~$${usd.toFixed(3)}`;
+  return `~$${usd.toFixed(2)}`;
+}
+
+/** Cache hit rate as a percent string, or "" when there is nothing to report. */
+export function cacheHitPct(prompt: number, cached: number): string {
+  if (prompt <= 0 || cached <= 0) return "";
+  return `${Math.min(100, Math.round((cached / prompt) * 100))}%`;
+}
+
 export function modelPricing(catalog: Catalog, provider: string, model: string): Pricing | null {
   const short = model.split("/").pop()!; // proxy ids like "anthropic/claude-x"
   const probe = (prov?: CatalogProvider): Pricing | null => {

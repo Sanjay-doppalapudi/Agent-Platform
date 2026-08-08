@@ -60,7 +60,19 @@ export function scanDangerous(cmd: string): string | null {
 // Windows drive letters use a lookbehind so `http://…` does NOT match as
 // drive `P:` (the prior `p:/` false positive made URL commands look like
 // in-workspace relative paths and skipped the outside-path gate).
-const PATH_TOKEN_RE = /(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|\/|~[\\/]|\$HOME\b|%USERPROFILE%|\$env:USERPROFILE)[^\s"'`;|&<>()*]*/g;
+//
+// The bare `/` alternative must not fire mid-token. Matching every slash
+// flagged `sed "s/foo/bar/g"`, `grep -r x src/` (→ the drive ROOT), `awk -F/`
+// and even `1/2` as outside-the-workspace paths — which in a headless run
+// (permits auto-deny) turned everyday commands into hard failures. A slash
+// only begins a path token when nothing path-ish precedes it.
+// A bare slash also needs a SECOND slash in the token to count as a path.
+// Without that, Windows command switches (`dir /s`, `taskkill /f /im`,
+// `robocopy … /e`, `findstr /i`) all resolved to C:\s, C:\f, C:\im … and were
+// reported as outside-the-workspace paths. Real absolute paths worth gating
+// (/etc/passwd, /home/other/.ssh/id_rsa, /workspace/leak, /c/Users/x) all have
+// one. Trade-off: a bare `/tmp` with no child is not flagged.
+const PATH_TOKEN_RE = /(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|(?<![A-Za-z0-9._~/-])\/(?=[^\s"'`;|&<>()*]*\/)|~[\\/]|\$HOME\b|%USERPROFILE%|\$env:USERPROFILE)[^\s"'`;|&<>()*]*/g;
 const URL_TOKEN_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`;|&<>()*]+/gi;
 
 /** Paths a command references outside the readable roots. {priv} = AP-private. */

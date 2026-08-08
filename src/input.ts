@@ -78,12 +78,15 @@ export function readLine(opts: {
     const stdin = process.stdin;
     if (stdin.isTTY) stdin.setRawMode(true);
     stdin.resume();
+    // Bracketed paste: newlines inside a paste do not submit the line.
+    if (stdin.isTTY) process.stdout.write("\x1b[?2004h");
 
     let buf = "";
     let menuIdx = 0;
     let menuClosed = false; // Esc pressed; reopens on next edit
     let histIdx = history.length;
     let fileCache: string[] | null = null;
+    let pasting = false;
 
     /** The token the menu operates on: {start, items} or null. */
     const activeMenu = (): { start: number; items: MenuItem[] } | null => {
@@ -189,10 +192,14 @@ export function readLine(opts: {
       stdin.removeListener("keypress", onKey);
       process.stdout.removeListener("resize", onResize);
       if (resizeTimer) clearTimeout(resizeTimer);
+      if (stdin.isTTY) process.stdout.write("\x1b[?2004l");
       const top = opts.frameTop?.();
-      process.stdout.write(`${rewind()}${top ? `${top}\n` : ""}${prompt}${result ?? ""}\n`);
+      // Collapse pasted newlines to spaces for the single-line prompt contract
+      // (multi-line is preserved in buf during editing for review).
+      const normalized = result === null ? null : result.replace(/\s+/g, " ").trim();
+      process.stdout.write(`${rewind()}${top ? `${top}\n` : ""}${prompt}${normalized ?? ""}\n`);
       drawnAbove = 0;
-      resolve(result);
+      resolve(normalized);
     };
 
     // Zoom/resize: redraw at the new width without waiting for a keypress.
@@ -238,9 +245,21 @@ export function readLine(opts: {
       }
       if (key.ctrl || key.meta) return;
 
+      // Bracketed-paste markers (may arrive as the whole str).
+      if (typeof str === "string") {
+        if (str.includes("\x1b[200~")) { pasting = true; str = str.replace(/\x1b\[200~/g, ""); }
+        if (str.includes("\x1b[201~")) { pasting = false; str = str.replace(/\x1b\[201~/g, ""); }
+      }
+
       const menu = activeMenu();
       switch (key.name) {
         case "return": case "enter":
+          if (pasting) {
+            buf += "\n";
+            menuClosed = false;
+            render();
+            return;
+          }
           if (menu) pick(menu, true);
           else done(buf);
           return;
@@ -273,11 +292,22 @@ export function readLine(opts: {
           }
           return;
       }
-      if (typeof str === "string" && str.length > 0 && str >= " ") {
-        buf += str;
-        menuClosed = false;
-        histIdx = history.length;
-        render();
+      if (typeof str === "string" && str.length > 0) {
+        // Multi-char paste (with or without bracketed mode): keep newlines in
+        // the buffer for review; Enter outside paste still submits.
+        if (str.length > 1 || pasting || str.includes("\n") || str.includes("\r")) {
+          buf += str.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+          menuClosed = false;
+          histIdx = history.length;
+          render();
+          return;
+        }
+        if (str >= " ") {
+          buf += str;
+          menuClosed = false;
+          histIdx = history.length;
+          render();
+        }
       }
     };
 

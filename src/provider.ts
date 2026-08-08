@@ -24,9 +24,19 @@ export class ProviderError extends Error {
     public status: number,
     public retryable: boolean,
     public midStream = false, // failed after deltas started (safe to retry the whole request — tools only run after full assembly)
+    public code?: string,
   ) {
     super(message);
   }
+}
+
+/** Parse Retry-After as seconds or HTTP-date; capped. */
+export function parseRetryAfterMs(raw: string | null, capMs = 60_000): number | undefined {
+  if (!raw) return undefined;
+  if (Number.isFinite(Number(raw))) return Math.min(Number(raw) * 1000, capMs);
+  const when = Date.parse(raw);
+  if (!Number.isFinite(when)) return undefined;
+  return Math.min(Math.max(0, when - Date.now()), capMs);
 }
 
 // Providers that reject stream_options get it dropped for that provider only.
@@ -104,9 +114,14 @@ export async function streamChat(
       }
       const retryable = res.status === 429 || res.status >= 500;
       if (retryable) {
-        const ra = res.headers.get("retry-after");
-        if (ra && Number.isFinite(Number(ra))) retryAfterMs = Number(ra) * 1000;
-        lastErr = new ProviderError(`HTTP ${res.status}: ${trunc(text)}`, res.status, true);
+        retryAfterMs = parseRetryAfterMs(res.headers.get("retry-after"), 60_000);
+        lastErr = new ProviderError(
+          `HTTP ${res.status}: ${trunc(text)}`,
+          res.status,
+          true,
+          false,
+          res.status === 429 ? "rate_limit" : undefined,
+        );
         continue;
       }
       throw new ProviderError(`HTTP ${res.status}: ${trunc(text)}`, res.status, false);

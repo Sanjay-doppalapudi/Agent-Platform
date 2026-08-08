@@ -71,6 +71,18 @@ describe("BOM must not void frontmatter", () => {
     expect(s.description).toBe("a demo skill");
   });
 
+  test("nested skill folders are discovered", () => {
+    clearSkillCache();
+    const cwd = mkdtempSync(join(tmpdir(), "ap-nestskill-"));
+    mkdirSync(join(cwd, ".ap", "skills", "group", "nested"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".ap", "skills", "group", "nested", "SKILL.md"),
+      "---\nname: nested\ndescription: deep skill\n---\nBody.\n",
+    );
+    const s = discoverSkills(loadConfig({ cwd } as any)).find((x) => x.name === "nested");
+    expect(s?.description).toBe("deep skill");
+  });
+
   test("a BOM'd skill marked internal is still skipped", () => {
     const cwd = mkdtempSync(join(tmpdir(), "ap-bomint-"));
     mkdirSync(join(cwd, ".ap", "skills", "hidden"), { recursive: true });
@@ -83,7 +95,12 @@ describe("BOM must not void frontmatter", () => {
 });
 
 describe("discovery cache keys", () => {
-  test("paths containing the former delimiter cannot collide", () => {
+  // POSIX only: this pins that a `|`-containing path cannot forge a cache-key
+  // collision, which needs REAL directories whose names contain "|". Windows
+  // forbids "|" in filenames outright (mkdir fails with ENOENT), so the
+  // collision is impossible there by construction and the test would only be
+  // asserting that mkdir failed.
+  test.skipIf(process.platform === "win32")("paths containing the former delimiter cannot collide", () => {
     const root = mkdtempSync(join(tmpdir(), "ap-cache-key-"));
     const firstData = `${root}/data|${root}/middle`;
     const firstCwd = `${root}/tail`;

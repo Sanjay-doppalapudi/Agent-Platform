@@ -112,6 +112,26 @@ const HELP_TOPICS: Record<string, string> = {
     ap loop -p "make all tests pass" --check "bun test"
     ap loop -p "port utils/ to TypeScript" --check "bun x tsc --noEmit" --check "bun test" --max 20`,
 
+  pr: `ap pr [--title t] [--body b] [--base branch] [--draft] [--yes] — create a GitHub PR
+
+  Uses the local gh CLI (must be authed). Never force-pushes. Refuses to
+  open a PR from a protected branch (main/master/…). Without --yes, prints
+  the drafted title/body and exits 2.
+
+  examples:
+    ap pr --title "Add retry" --body "## Summary\\n- …" --yes
+    ap pr --draft --yes          # model drafts title+body when a provider is configured`,
+
+  tmux: `ap tmux [layout|list|spawn|capture] — optional unix adapter
+
+  Detected via PATH; on native Windows prints a clear fallback hint
+  (use /worktree + bash background:true + /ps, or WSL).
+
+  ap tmux                 # 3-pane layout: ap | shell | spare
+  ap tmux list
+  ap tmux spawn -p "task" # detached ap run --light in a new session
+  ap tmux capture <name>  # pull pane text back`,
+
   skills: `ap skills [add <src> [--skill name] | remove <name>] — SKILL.md packs
 
   Skills are reusable instruction folders (skills.sh / Claude Code format:
@@ -179,8 +199,10 @@ const HELP_TOPICS: Record<string, string> = {
   Hooks fire here too (hooks.onDone/onError — command or webhook URL).`,
 
   sessions: `ap sessions — list · ap sessions search <q> — ripgrep transcripts
+  ap sessions delete <id> · ap sessions rename <id> <title>
   ap resume — interactive picker · ap -c — resume most recent
-  Sessions are append-only JSONL in <dataDir>/sessions/<id>.jsonl.`,
+  Sessions are append-only JSONL in <dataDir>/sessions/<id>.jsonl.
+  Titles are meta labels (file id unchanged); /rename in the REPL does the same.`,
 };
 
 function printHelp(topic?: string) {
@@ -205,9 +227,11 @@ Usage:
   ap models [query]        search the models.dev catalog (context + prices)
   ap auth <provider>       store an API key (hidden input, user-locked file)
   ap resume                pick a recent session to resume
-  ap sessions [search q]   list sessions / full-text search them
+  ap sessions [search|delete|rename]  list / search / delete / rename sessions
   ap share [id]            export a transcript as one self-contained HTML file
   ap ps [tail|kill <pid>]  background processes started with bash background:true
+  ap pr [--draft] [--base b] [--title t]  create a GitHub PR via gh (never force-pushes)
+  ap tmux [layout|list|spawn|capture]  optional unix tmux adapter (graceful on Windows)
   ap doctor [--offline]    diagnose the environment (deps, keys, endpoint, MCP)
   ap prompt [--cwd dir]    print the exact system prompt for a directory
   ap tool <name> '<json>'  run one tool directly, no LLM (testing)
@@ -518,6 +542,112 @@ Example:  ap mcp add fs bun x @modelcontextprotocol/server-filesystem .`);
     console.log(`\nap ps tail <pid> [lines] · ap ps kill <pid>`);
     break;
   }
+  case "pr": {
+    const { loadConfig, resolveProvider } = await import("./config.ts");
+    const { gitState, prPromptMaterial, createPullRequest, cleanCommitMessage } = await import("./git.ts");
+    const { streamChat } = await import("./provider.ts");
+    const config = loadConfig(flags);
+    if (config.light) { console.error("/pr requires the full profile (omit --light)"); process.exit(1); }
+    let draft = false;
+    let base: string | undefined;
+    let title = "";
+    let body = "";
+    for (let i = 0; i < rest.length; i++) {
+      const a = rest[i]!;
+      if (a === "--draft") { draft = true; continue; }
+      if (a === "--base") { base = rest[++i]; continue; }
+      if (a === "--title") { title = rest[++i] ?? ""; continue; }
+      if (a === "--body") { body = rest[++i] ?? ""; continue; }
+      if (!a.startsWith("--") && !title) { title = a; continue; }
+    }
+    const st = gitState(config);
+    if (!st.repo) { console.error("not a git repository"); process.exit(1); }
+    if (st.protectedBranch) {
+      console.error(`on protected branch "${st.branch}" — switch to a feature branch first`);
+      process.exit(1);
+    }
+    const mat = prPromptMaterial(config, base);
+    if (!title) {
+      try {
+        const provider = resolveProvider(config, flags);
+        let draftText = "";
+        await streamChat(
+          provider,
+          [
+            {
+              role: "system",
+              content:
+                "Draft a GitHub pull request. First line: title under 72 chars. Then a blank line. Then a short markdown body with ## Summary and ## Test plan. Output only the PR text.",
+            },
+            {
+              role: "user",
+              content: `Branch ${mat.head} → ${mat.base}\n\nCommits:\n${mat.commits || "(none)"}\n\nDiff:\n${mat.diff || "(empty)"}`,
+            },
+          ],
+          [], (d) => { draftText += d; }, undefined, undefined, undefined, config.streamIdleSeconds * 1000,
+        );
+        const lines = draftText.trim().split(/\r?\n/);
+        title = cleanCommitMessage(lines[0] ?? "").split("\n")[0] ?? "";
+        if (!body) body = lines.slice(1).join("\n").replace(/^\s*\n/, "").trim();
+      } catch (e) {
+        console.error(`could not draft title: ${(e as Error).message}\npass --title explicitly`);
+        process.exit(1);
+      }
+    }
+    if (!title) { console.error("missing --title"); process.exit(1); }
+    if (!body) body = `## Summary\n- ${title}\n\n## Test plan\n- [ ] verified locally`;
+    // Non-interactive CLI: require AP_PR_YES=1 or --yes to actually create (safety).
+    const yes = rest.includes("--yes") || process.env.AP_PR_YES === "1";
+    if (!yes) {
+      console.log(`${mat.head} → ${mat.base}${draft ? " (draft)" : ""}`);
+      console.log(title);
+      console.log(body);
+      console.error("\nre-run with --yes to create (or set AP_PR_YES=1)");
+      process.exit(2);
+    }
+    const r = createPullRequest(config, { title, body, base: mat.base, draft });
+    console.log(r.out);
+    process.exit(r.ok ? 0 : 1);
+  }
+  case "tmux": {
+    const { loadConfig } = await import("./config.ts");
+    const { tmuxAvailable, tmuxMissingHint, tmuxList, tmuxLayout, tmuxSpawn, tmuxCapture } = await import("./tmux.ts");
+    const config = loadConfig(flags);
+    if (!tmuxAvailable()) {
+      console.error(tmuxMissingHint());
+      process.exit(1);
+    }
+    const sub = rest[0] ?? "layout";
+    if (sub === "list") {
+      const r = tmuxList();
+      console.log(r.out);
+      process.exit(r.ok ? 0 : 1);
+    }
+    if (sub === "layout") {
+      const r = tmuxLayout(config, rest[1] || "ap");
+      console.log(r.out);
+      process.exit(r.ok ? 0 : 1);
+    }
+    if (sub === "spawn") {
+      const pIdx = rest.indexOf("-p");
+      const task = pIdx >= 0 ? rest[pIdx + 1] : rest.slice(1).join(" ").trim();
+      if (!task) {
+        console.error('usage: ap tmux spawn -p "task"');
+        process.exit(1);
+      }
+      const r = tmuxSpawn(config, task);
+      console.log(r.out);
+      process.exit(r.ok ? 0 : 1);
+    }
+    if (sub === "capture") {
+      if (!rest[1]) { console.error("usage: ap tmux capture <session> [lines]"); process.exit(1); }
+      const r = tmuxCapture(rest[1], Number(rest[2]) || 80);
+      console.log(r.out);
+      process.exit(r.ok ? 0 : 1);
+    }
+    console.error("usage: ap tmux [layout|list|spawn|capture]");
+    process.exit(1);
+  }
   case "share": {
     const { loadConfig } = await import("./config.ts");
     const { Session } = await import("./session.ts");
@@ -633,8 +763,30 @@ Example:  ap mcp add fs bun x @modelcontextprotocol/server-filesystem .`);
       console.log(`\nresume with: ap --resume <id>`);
       break;
     }
+    if (rest[0] === "delete" || rest[0] === "rm") {
+      const id = rest[1];
+      if (!id) { console.error("usage: ap sessions delete <id>"); process.exit(1); }
+      try {
+        Session.load(config.dataDir, id);
+        Session.delete(config.dataDir, id);
+        console.log(`deleted ${id}`);
+      } catch (e) { console.error((e as Error).message); process.exit(1); }
+      break;
+    }
+    if (rest[0] === "rename") {
+      const id = rest[1];
+      const title = rest.slice(2).join(" ");
+      if (!id) { console.error("usage: ap sessions rename <id> <title>"); process.exit(1); }
+      try {
+        const s = Session.rename(config.dataDir, id, title);
+        console.log(s.meta?.title ? `renamed ${id} → ${s.meta.title}` : `cleared title on ${id}`);
+      } catch (e) { console.error((e as Error).message); process.exit(1); }
+      break;
+    }
     for (const s of Session.list(config.dataDir, 20)) {
-      console.log(`${s.id}  ${new Date(s.mtime).toLocaleString()}`);
+      let title = "";
+      try { title = Session.load(config.dataDir, s.id).meta?.title ?? ""; } catch {}
+      console.log(`${s.id}${title ? `  ${title}` : ""}  ${new Date(s.mtime).toLocaleString()}`);
     }
     break;
   }

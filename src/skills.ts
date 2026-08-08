@@ -30,20 +30,26 @@ function parseFrontmatter(md: string): Record<string, string> {
   return out;
 }
 
-function scanDir(dir: string, source: string, into: Map<string, SkillInfo>) {
+function scanDir(dir: string, source: string, into: Map<string, SkillInfo>, depth = 0) {
   let entries: string[];
-  try { entries = readdirSync(dir); } catch { return; }
+  try { entries = readdirSync(dir, { withFileTypes: true }); } catch { return; }
   for (const e of entries) {
-    const skillMd = join(dir, e, "SKILL.md");
-    if (!existsSync(skillMd)) continue;
-    try {
-      const raw = readFileSync(skillMd, "utf8").replace(/^﻿/, ""); // BOM voids frontmatter
-      if (/^\s*internal:\s*true/m.test(raw.match(FRONT_RE)?.[1] ?? "")) continue;
-      const fm = parseFrontmatter(raw);
-      const name = fm["name"] || e;
-      if (into.has(name)) continue; // earlier sources win (project > global)
-      into.set(name, { name, description: fm["description"] ?? "", path: skillMd, source });
-    } catch {}
+    if (!e.isDirectory()) continue;
+    const leaf = e.name;
+    const skillMd = join(dir, leaf, "SKILL.md");
+    if (existsSync(skillMd)) {
+      try {
+        const raw = readFileSync(skillMd, "utf8").replace(/^﻿/, ""); // BOM voids frontmatter
+        if (/^\s*internal:\s*true/m.test(raw.match(FRONT_RE)?.[1] ?? "")) continue;
+        const fm = parseFrontmatter(raw);
+        const name = fm["name"] || leaf;
+        if (into.has(name)) continue; // earlier sources win (project > global)
+        into.set(name, { name, description: fm["description"] ?? "", path: skillMd, source });
+      } catch {}
+    } else if (depth < 2) {
+      // Nested category folders: skills/group/foo/SKILL.md (depth-capped)
+      scanDir(join(dir, leaf), source, into, depth + 1);
+    }
   }
 }
 
