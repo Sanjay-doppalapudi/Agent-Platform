@@ -36,9 +36,11 @@ jobs:
           cat checksums.txt
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            dist/*
-            dist/checksums.txt
+          # dist/* already includes checksums.txt (written into dist/ above).
+          # Do NOT also list dist/checksums.txt — a duplicate entry makes the
+          # action upload it twice, and the second pass fails trying to UPDATE
+          # the just-created asset ("Not Found - update-a-release-asset").
+          files: dist/*
           generate_release_notes: true
       # Auto-publish to npm when the NPM_TOKEN repo secret is configured
       # (granular access token with 2FA bypass). Without the secret this
