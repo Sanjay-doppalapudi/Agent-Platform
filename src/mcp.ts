@@ -43,6 +43,8 @@ const LIST_TIMEOUT_MS = 20_000;
 const CALL_TIMEOUT_MS = 120_000;
 const RESULT_CAP_BYTES = 40_000;
 const MAX_TOOLS_PER_SERVER = 500;
+/** Hard cap on a single stdio/SSE/HTTP JSON-RPC frame from an MCP server. */
+const MAX_MCP_FRAME_BYTES = 2 * 1024 * 1024;
 
 function anySignal(a: AbortSignal | undefined, b: AbortSignal): AbortSignal {
   if (!a) return b;
@@ -104,11 +106,16 @@ class McpClient {
     try {
       for await (const chunk of this.proc.stdout as any) {
         buf += decoder.decode(chunk, { stream: true });
+        if (buf.length > MAX_MCP_FRAME_BYTES) {
+          this.close();
+          throw new Error(`mcp server "${this.name}" sent an oversized frame (>${MAX_MCP_FRAME_BYTES} bytes)`);
+        }
         let nl: number;
         while ((nl = buf.indexOf("\n")) !== -1) {
           const line = buf.slice(0, nl).trim();
           buf = buf.slice(nl + 1);
           if (!line) continue;
+          if (line.length > MAX_MCP_FRAME_BYTES) continue;
           try { this.dispatch(JSON.parse(line)); } catch {}
         }
       }
@@ -216,7 +223,7 @@ class McpClient {
     const ctype = res.headers.get("content-type") ?? "";
     const reply = ctype.includes("text/event-stream")
       ? await readSseResponse(res, msg.id!)
-      : ((await res.json()) as JsonRpcMsg);
+      : await readJsonCapped(res, MAX_MCP_FRAME_BYTES, this.name);
     if (!reply) throw new Error(`mcp "${this.name}" stream ended without answering ${msg.method}`);
     if (reply.error) throw new Error(reply.error.message ?? `RPC error ${reply.error.code}`);
     return reply.result;
@@ -278,6 +285,9 @@ async function readSseResponse(res: Response, id: number): Promise<JsonRpcMsg | 
       const { done, value } = await reader.read();
       if (done) return null;
       buf = (buf + decoder.decode(value, { stream: true })).replace(/\r\n/g, "\n");
+      if (buf.length > MAX_MCP_FRAME_BYTES) {
+        throw new Error(`mcp SSE frame exceeded ${MAX_MCP_FRAME_BYTES} bytes`);
+      }
       let sep: number;
       while ((sep = buf.indexOf("\n\n")) !== -1) {
         const event = buf.slice(0, sep);
@@ -297,6 +307,33 @@ async function readSseResponse(res: Response, id: number): Promise<JsonRpcMsg | 
   } finally {
     try { reader.cancel(); } catch {}
   }
+}
+
+/** Bounded JSON body read — never buffer an unbounded MCP HTTP response. */
+async function readJsonCapped(res: Response, limit: number, name: string): Promise<JsonRpcMsg> {
+  const reader = res.body?.getReader();
+  if (!reader) throw new Error(`mcp "${name}" empty HTTP body`);
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      total += value.byteLength;
+      if (total > limit) {
+        try { await reader.cancel(); } catch {}
+        throw new Error(`mcp "${name}" HTTP body exceeded ${limit} bytes`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    try { reader.releaseLock(); } catch {}
+  }
+  const buf = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) { buf.set(c, at); at += c.byteLength; }
+  return JSON.parse(new TextDecoder().decode(buf)) as JsonRpcMsg;
 }
 
 // ---------------------------------------------------------------------------
@@ -320,12 +357,16 @@ function findMcpJson(startDir: string): any {
   return null;
 }
 
-/** All configured servers: ap config `mcpServers` + project .mcp.json (wins). */
+/** All configured servers: home/ap config `mcpServers` + project `.mcp.json`
+ *  when the workspace is trusted. Untrusted `.mcp.json` is ignored — that
+ *  file is RCE on first turn (stdio spawn). */
 export function mcpServerSpecs(config: Config): Record<string, McpServerSpec> {
   const merged: Record<string, McpServerSpec> = {
     ...(config.mcpServers ?? {}),
-    ...(findMcpJson(config.cwd)?.mcpServers ?? {}),
   };
+  if (config.workspaceTrusted === true) {
+    Object.assign(merged, findMcpJson(config.cwd)?.mcpServers ?? {});
+  }
   const out: Record<string, McpServerSpec> = {};
   for (const [name, spec] of Object.entries(merged)) {
     if (spec && typeof spec === "object" && (spec.command || spec.url)) out[name] = spec;
@@ -398,7 +439,9 @@ async function doInit(config: Config, warn: (msg: string) => void): Promise<void
       let canonical = `mcp_${san(name)}_${san(t.name)}`.slice(0, 64);
       for (let n = 2; taken.has(canonical); n++) canonical = `${canonical.slice(0, 61)}_${n}`;
       taken.add(canonical);
-      const readOnly = t.annotations?.readOnlyHint === true;
+      const readOnly = false; // MCP annotations are untrusted hints — never
+      // authorize plan-mode / parallel-safety from readOnlyHint alone.
+      // A local allowlist can be added later; default fail-closed.
       const client = r.client;
       const toolName = t.name as string;
       defs.push({

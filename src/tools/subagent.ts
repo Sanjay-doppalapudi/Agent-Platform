@@ -4,6 +4,7 @@
 // Children are always `ap run --json --light`, so they cannot spawn further
 // agents — the structural recursion cap lives in the profile, not in code.
 import { existsSync } from "node:fs";
+import { agentChildEnv } from "../trust.ts";
 
 /** How to re-invoke ourselves: compiled exe vs `bun src/index.ts`.
  * Compiled binaries embed the entry at a VIRTUAL path — "/$bunfs/…" on
@@ -48,7 +49,9 @@ export interface SubagentOpts {
 export async function runSubagent(opts: SubagentOpts): Promise<SubagentResult> {
   const proc = Bun.spawn(
     [...selfCmd(), "run", "-p", opts.task, "--json", "--light", "--cwd", opts.cwd, ...(opts.extraArgs ?? [])],
-    { stdout: "pipe", stderr: "pipe", stdin: "ignore", windowsHide: true } as any,
+    // agentChildEnv marks the child as model-controlled so it can never grant
+    // workspace trust (`ap trust accept`) on the model's behalf.
+    { stdout: "pipe", stderr: "pipe", stdin: "ignore", windowsHide: true, env: agentChildEnv() } as any,
   );
   let stderrTail = "";
   const stderrDone = (async () => {

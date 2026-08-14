@@ -52,7 +52,25 @@ export function resolvePath(p: string, cwd: string): string {
     // check, which made them a full sandbox bypass.
     p = p.replace(/^\\\\[?.]\\UNC\\/i, "\\\\").replace(/^\\\\[?.]\\(?=[A-Za-z]:[\\/])/, "");
   }
-  return isAbsolute(p) ? resolve(p) : resolve(cwd, p);
+  const out = isAbsolute(p) ? resolve(p) : resolve(cwd, p);
+  return process.platform === "win32" ? win32NormalizeTrailing(out) : out;
+}
+
+/**
+ * Windows silently trims trailing dots and spaces from every path COMPONENT
+ * when it opens a file, so `ap.config.json.` and `ap.config.json ` both address
+ * the real `ap.config.json`, and `credentials.json ` addresses the real
+ * credentials file. Our hard-denies compare the exact string we were handed, so
+ * without mirroring that normalization a single trailing byte slipped a write
+ * past every name-based guard (privileged config, prompt-poison, private data)
+ * while the OS created the real, guarded file. win32 ONLY — trailing dots and
+ * spaces are legal, meaningful filename bytes on POSIX and must be preserved.
+ */
+export function win32NormalizeTrailing(abs: string): string {
+  return abs
+    .split(/([\\/])/) // keep separators as their own elements
+    .map((seg) => (seg === "\\" || seg === "/" ? seg : seg.replace(/[ .]+$/, "") || seg))
+    .join("");
 }
 
 // ── Sandbox boundary (guardrail, not a VM: bash containment is still
@@ -94,6 +112,60 @@ export function isRestrictedDataDirPath(target: string, config: Config): boolean
   return !isInsideRoots(target, dataDirWriteRoots(config));
 }
 
+/** Paths whose contents are injected into the system prompt. Model writes
+ *  here are prompt-injection persistence — hard-deny (permits cannot override). */
+export function isPromptPoisonPath(target: string, config: Config): boolean {
+  const names = ["AP.md", "AGENTS.md", "HARNESS.md", "CLAUDE.md"];
+  const base = basename(target);
+  if (names.some((n) => n.toLowerCase() === base.toLowerCase())) {
+    const rootFile = join(config.cwd, base);
+    const t = process.platform === "win32" ? target.toLowerCase() : target;
+    const r = process.platform === "win32" ? rootFile.toLowerCase() : rootFile;
+    if (t === r) return true;
+  }
+  const ap = join(config.cwd, ".ap");
+  if (isInsideRoots(target, [ap])) {
+    const rel = relative(ap, target).replace(/\\/g, "/").toLowerCase();
+    if (rel === "decisions.md") return true;
+    if (rel.startsWith("skills/") || rel.startsWith("agents/") || rel.startsWith("workflows/")) return true;
+  }
+  const claude = join(config.cwd, ".claude");
+  if (isInsideRoots(target, [claude])) {
+    const cr = relative(claude, target).replace(/\\/g, "/").toLowerCase();
+    if (cr.startsWith("skills/") || cr.startsWith("agents/")) return true;
+  }
+  return false;
+}
+
+/**
+ * Files that grant CODE EXECUTION on the next run, independent of the system
+ * prompt: project config (hooks.onDone runs as a raw shell command every turn
+ * end; sandbox/bashGuard/permission disable AP's own guardrails), the MCP
+ * server list (spawned before the first turn), custom slash commands, and git
+ * hooks (run by /commit). Once a workspace is trusted — the normal steady
+ * state for the user's own repos — a project config passes through wholesale,
+ * so a single model write is full RCE on the next launch.
+ *
+ * Matched by NAME in any directory, not just config.cwd: both discovery
+ * walkers (findProjectConfig in config.ts, findMcpJson in mcp.ts) climb up to
+ * 20 ancestors, so a deny anchored at the workspace root would miss the
+ * parent directory the walker actually reads.
+ */
+const PRIVILEGED_CONFIG_NAMES = ["ap.config.json", "harness.config.json", ".mcp.json"];
+
+export function isPrivilegedConfigPath(target: string): boolean {
+  const norm = target.replace(/\\/g, "/").toLowerCase();
+  const segs = norm.split("/");
+  const base = segs[segs.length - 1] ?? "";
+  if (PRIVILEGED_CONFIG_NAMES.includes(base)) return true;
+  for (let i = 0; i < segs.length - 1; i++) {
+    const a = segs[i], b = segs[i + 1];
+    if (a === ".git" && b === "hooks") return true; // pre-commit & friends run on /commit
+    if ((a === ".ap" || a === ".claude") && b === "commands") return true; // bodies inject into the next turn
+  }
+  return false;
+}
+
 export function isInsideRoots(target: string, roots: string[]): boolean {
   const t = process.platform === "win32" ? target.toLowerCase() : target;
   for (const root of roots) {
@@ -111,6 +183,10 @@ export function isInsideRoots(target: string, roots: string[]): boolean {
  * would pass a workspace-relative check and then follow the link.
  */
 export function canonicalPath(target: string): string {
+  // Normalize Windows trailing dots/spaces BEFORE resolving, so the rebased
+  // not-yet-existing-file branch below cannot carry `foo.json.` through to a
+  // name check that then fails to match `foo.json`.
+  if (process.platform === "win32") target = win32NormalizeTrailing(target);
   try {
     return realpathSync(target);
   } catch {
@@ -144,13 +220,19 @@ export function readRoots(config: Config): string[] {
   return roots;
 }
 
-/** The four AP-private locations (transcripts, checkpoints, credentials, config). */
+/** AP-private locations (transcripts, checkpoints, credentials, config) plus
+ *  the workspace-trust store. The trust store lives under the HOME data dir
+ *  (never a project-relocatable dataDir), and writing it is a privilege grant —
+ *  hard-deny it here so neither a file tool nor a bash redirect can flip trust
+ *  for a workspace without the interactive `ap trust accept` flow. */
 export function privatePaths(config: Config): string[] {
   return [
     join(config.dataDir, "sessions"),
     join(config.dataDir, "checkpoints"),
     join(config.dataDir, "credentials.json"),
     join(config.dataDir, "config.json"),
+    join(homedir(), ".ap", "trusted-workspaces.json"),
+    join(homedir(), ".harness", "trusted-workspaces.json"),
   ];
 }
 
@@ -228,6 +310,19 @@ export async function ensureAllowed(path: string, ctx: ToolCtx, action: string):
       `denied: ${path} is under AP's data dir — only memory/ and artifacts/ are writable there (skills, agents, workflows, logs are not).`,
     );
   }
+  if (isPromptPoisonPath(path, ctx.config) || isPromptPoisonPath(canon, ctx.config)) {
+    throw new ToolError(
+      `denied: ${path} feeds the system prompt (project notes / .ap skills|agents|workflows|DECISIONS) — edit it yourself outside the agent, or use memory/ for preferences.`,
+    );
+  }
+  // Same tier as private paths: a permit cannot override this. Trusting a
+  // workspace is the USER's decision, and these files convert that trust into
+  // code execution on the next run.
+  if (isPrivilegedConfigPath(path) || isPrivilegedConfigPath(canon)) {
+    throw new ToolError(
+      `denied: ${path} grants code execution on the next run (project config hooks/MCP/sandbox, slash commands, git hooks) — propose the change in your reply and let the user apply it themselves.`,
+    );
+  }
   if (isInsideRoots(canon, sandboxRoots(ctx.config)) || isInsideRoots(path, sandboxRoots(ctx.config))) {
     if (canon !== path && !isInsideRoots(canon, sandboxRoots(ctx.config))) {
       const okLink = await ctx.permit({ action: `${action} outside workspace (symlink)`, detail: `${path} → ${canon}`, path: canon });
@@ -285,6 +380,16 @@ export function isSecretFile(path: string): boolean {
   return false;
 }
 
+/** True if the lexical path OR its symlink target looks secret. */
+export function isSecretPath(path: string): boolean {
+  if (isSecretFile(path) || isEnvFile(path)) return true;
+  try {
+    const canon = canonicalPath(path);
+    if (canon !== path && (isSecretFile(canon) || isEnvFile(canon))) return true;
+  } catch { /* ignore */ }
+  return false;
+}
+
 /** Mask values in .env content: KEY=*** (model sees keys, never values). */
 export function redactEnvContent(content: string): string {
   // Split on ALL line-ending flavours. Splitting on "\n" alone left a trailing
@@ -308,7 +413,7 @@ export function redactGrepLine(line: string): string {
   const m = line.match(/^(.+?)([:-])(\d+)\2(.*)$/);
   if (!m) return line;
   const file = m[1]!;
-  if (!isSecretFile(file) && !isEnvFile(file)) return line;
+  if (!isSecretPath(file) && !isSecretFile(file) && !isEnvFile(file)) return line;
   const body = m[4]!;
   // Prefer KEY=*** when it looks like an env assignment; otherwise mask the
   // whole payload so pem/key material never reaches the model via grep.

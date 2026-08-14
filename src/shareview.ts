@@ -115,6 +115,9 @@ export function exportSessionHtml(
   model: string,
   cwd: string,
 ): string {
+  if (!/^[A-Za-z0-9._-]+$/.test(sessionId) || sessionId.includes("..")) {
+    throw new Error(`invalid session id: ${sessionId}`);
+  }
   const dir = join(dataDir, "shares");
   mkdirSync(dir, { recursive: true });
   const path = join(dir, `${sessionId}.html`);

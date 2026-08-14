@@ -15,7 +15,9 @@ are original — they were learned from the projects below. Credit where it's du
   `.claude/agents`, project-notes files (`CLAUDE.md`-style `AP.md`), markdown
   custom slash commands, pre/post tool hooks, and the checkpoints/rewind idea.
 - **[OpenAI Codex CLI](https://github.com/openai/codex)** — the `AGENTS.md`
-  convention and the approval-modes way of thinking about agent safety.
+  convention, the approval-modes way of thinking about agent safety, and its
+  OS-level sandboxing (Seatbelt/Landlock) that motivated AP's opt-in
+  `sandbox:"container"` mode.
 - **[Cline](https://github.com/cline/cline)** — the plan/act split, workspace
   checkpoints with diff review, and the monitor-diagnostics-and-self-fix idea
   behind AP's `afterEdit` hook.
@@ -31,7 +33,7 @@ are original — they were learned from the projects below. Credit where it's du
 - **[Agent Client Protocol](https://agentclientprotocol.com)** (Zed Industries) —
   the editor protocol behind `ap acp`.
 - **[models.dev](https://models.dev)** — the open provider/model catalog powering
-  `/models`, pricing on the status line, and `/effort`'s reasoning-support check.
+  `/model`, pricing on the status line, and `/effort`'s reasoning-support check.
 - **DuckDuckGo** — the HTML endpoint behind the key-free `websearch` tool.
 
 ## Skills ecosystem
@@ -59,4 +61,7 @@ are original — they were learned from the projects below. Credit where it's du
 - **tmux** — optional unix adapter (`ap tmux` / `/spawn`); detected on PATH,
   never a dependency. Windows falls back to `/ps` + worktrees.
 - **Vercel Sandbox** — the guardrail-not-a-VM framing that shaped AP's sandbox
-  honesty (documented limits, containers recommended for untrusted code).
+  honesty (documented limits, and the built-in `sandbox:"container"` escalation
+  for untrusted code).
+- **[Docker](https://www.docker.com) / [Podman](https://podman.io)** — the
+  container runtime behind `sandbox:"container"`; detected on PATH, never bundled.

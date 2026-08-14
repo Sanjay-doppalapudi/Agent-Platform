@@ -31,6 +31,8 @@ describe("scanDangerous", () => {
     "powershell -enc AQAB",
     "find / -delete",
     "chmod 777 /",
+    "git push --force origin main",
+    "git reset --hard HEAD",
   ];
   for (const cmd of blocked) {
     test(`blocks: ${cmd.slice(0, 40)}`, () => expect(scanDangerous(cmd)).not.toBeNull());

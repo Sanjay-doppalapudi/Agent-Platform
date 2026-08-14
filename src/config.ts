@@ -1,11 +1,21 @@
 // Config loading + provider resolution.
 // Precedence: CLI flags > env vars > ./ap.config.json (walked upward, legacy
 // harness.config.json accepted) > <dataDir>/config.json
+//
+// SECURITY: untrusted project configs are filtered to a SAFE allowlist
+// (ignore/theme/…). hooks/MCP/sandbox/providers/dataDir/permission/… require
+// `ap trust accept`. See trust.ts / SECURITY.md.
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { getKey } from "./creds.ts";
 import type { CliFlags } from "./index.ts";
+import {
+  isWorkspaceTrusted,
+  mergeProviders,
+  stripPrivilegedProjectConfig,
+  trustRoot,
+} from "./trust.ts";
 
 export interface ProviderEntry {
   baseUrl: string;
@@ -47,8 +57,24 @@ export interface Config {
    *  Tool keys and bash command patterns support * globs. "allow" skips the
    *  ask gate only — the path sandbox and bashGuard still apply. */
   permission?: Record<string, PermissionVerdict | Record<string, PermissionVerdict>>;
-  sandbox: "workspace" | "off";
+  /** File-tool + bash path containment.
+   *  - "workspace": in-process guardrail (path containment + pattern scan) — a
+   *    speed bump, NOT a real sandbox (bash is still host code execution).
+   *  - "container": bash runs inside a throwaway docker/podman container with
+   *    ONLY the workspace bind-mounted and egress off by default — a real OS
+   *    boundary. File tools still run in-process (already contained).
+   *  - "off": no file gates at all. */
+  sandbox: "workspace" | "container" | "off";
   bashGuard: "on" | "off";
+  /** Network egress policy for fetch / websearch / bash URL tokens and the
+   *  container network. undefined | "allow" keeps egress open (metadata hosts
+   *  are ALWAYS blocked regardless). "deny" blocks all egress; a string[] is a
+   *  hostname allowlist (suffix match). In-process enforcement is best-effort
+   *  (same stance as bashGuard); container mode enforces it at the OS level. */
+  network?: "allow" | "deny" | string[];
+  /** Image for sandbox:"container" (default "alpine"). The command runs as
+   *  `/bin/sh -c` inside it, workspace mounted at /workspace. */
+  sandboxImage?: string;
   /** Light profile: smallest possible prompt + no optional features. Every
    *  non-essential feature (current and future) must check this flag. */
   light: boolean;
@@ -103,6 +129,10 @@ export interface Config {
      *  switch to `ap/<slug>` so main/master stay untouched. Default off. */
     autoBranch?: boolean;
   };
+  /** Whether this cwd/git-root is on the trust list (set by loadConfig). */
+  workspaceTrusted?: boolean;
+  /** Absolute path of the project config that was loaded, if any. */
+  projectConfigPath?: string;
 }
 
 export interface ResolvedProvider {
@@ -152,11 +182,14 @@ function readJson(path: string): Record<string, unknown> | null {
 }
 
 /** Walk upward from cwd looking for ap.config.json (or legacy harness.config.json). */
-function findProjectConfig(startDir: string): Record<string, unknown> | null {
+function findProjectConfig(startDir: string): { path: string; data: Record<string, unknown> } | null {
   let dir = resolve(startDir);
   for (let i = 0; i < 20; i++) {
-    const found = readJson(join(dir, "ap.config.json")) ?? readJson(join(dir, "harness.config.json"));
-    if (found) return found;
+    for (const name of ["ap.config.json", "harness.config.json"]) {
+      const p = join(dir, name);
+      const data = readJson(p);
+      if (data) return { path: p, data };
+    }
     const parent = dirname(dir);
     if (parent === dir) break;
     dir = parent;
@@ -170,16 +203,69 @@ function expandHome(p: string): string {
 
 export function loadConfig(flags: CliFlags): Config {
   const cwd = resolve(flags.cwd ?? process.cwd());
-  const home = readJson(join(defaultDataDir(), "config.json")) ?? {};
-  const project = findProjectConfig(cwd) ?? {};
-  const merged = { ...DEFAULTS, provider: "", providers: {}, ...home, ...project } as unknown as Config;
+  // User-controlled dataDir only: env > home config > default. Never project.
+  const envDataDir = process.env.AP_DATA_DIR || process.env.HARNESS_DATA_DIR;
+  const dataDir = expandHome(
+    envDataDir
+      ?? (readJson(join(defaultDataDir(), "config.json"))?.dataDir as string | undefined)
+      ?? DEFAULTS.dataDir,
+  );
+  const home = readJson(join(dataDir, "config.json")) ?? readJson(join(defaultDataDir(), "config.json")) ?? {};
+  const found = findProjectConfig(cwd);
+  const projectRaw = found?.data ?? {};
+  const trusted = isWorkspaceTrusted(expandHome((home.dataDir as string) ?? dataDir), cwd);
+  const { safe: project, stripped } = stripPrivilegedProjectConfig(projectRaw, trusted);
+
+  // dataDir comes ONLY from env / user home config (or defaults) — never from a
+  // project file. A cloned repo must not relocate credentials/sessions into
+  // itself (commit leak) or onto an absolute path (store hijack).
+  const resolvedDataDir = expandHome(
+    envDataDir
+      ?? (home.dataDir as string | undefined)
+      ?? DEFAULTS.dataDir,
+  );
+
+  const providers = mergeProviders(
+    home.providers as Record<string, unknown> | undefined,
+    // Only merge project providers when trusted; stripPrivileged already drops
+    // the key when untrusted, but mergeProviders enforces the credential rules.
+    trusted
+      ? (projectRaw.providers as Record<string, unknown> | undefined)
+      : undefined,
+    trusted,
+  );
+
+  // Build merged config: defaults ← home ← sanitized project, then restore
+  // deep-merged providers (shallow spread would clobber the merge).
+  const { providers: _hp, dataDir: _hd, ...homeRest } = home as Record<string, unknown>;
+  const { providers: _pp, dataDir: _pd, ...projectRest } = project;
+  const merged = {
+    ...DEFAULTS,
+    provider: "",
+    ...homeRest,
+    ...projectRest,
+    providers,
+  } as unknown as Config;
   merged.cwd = cwd;
-  merged.dataDir = expandHome(merged.dataDir ?? DEFAULTS.dataDir);
+  merged.dataDir = resolvedDataDir;
   merged.providers ??= {};
   merged.ignore ??= [];
+  merged.workspaceTrusted = trusted;
+  if (found) merged.projectConfigPath = found.path;
+
+  if (stripped.length && found) {
+    console.error(
+      `⚠ untrusted workspace (${trustRoot(cwd)}) — ignoring project ${stripped.join(", ")} from ${found.path}. ` +
+      `Run \`ap trust\` to allow privileged project config (hooks/MCP/sandbox/providers/…).`,
+    );
+  }
+
   if (flags.provider) merged.provider = flags.provider;
   if (flags.mode === "plan" || flags.mode === "code") merged.mode = flags.mode;
   if (flags.noSandbox) merged.sandbox = "off";
+  if (flags.sandbox === "workspace" || flags.sandbox === "container" || flags.sandbox === "off") {
+    merged.sandbox = flags.sandbox;
+  }
   if (flags.light) merged.light = true;
   return merged;
 }

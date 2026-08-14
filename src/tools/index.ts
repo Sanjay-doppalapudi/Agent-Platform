@@ -182,7 +182,7 @@ export const TOOLS: ToolDef[] = [
   },
   {
     name: "artifact",
-    description: "Save a self-contained HTML page (report, diagram, dashboard) the user can open in a browser. Inline CSS/JS only — a no-network CSP is enforced.",
+    description: "Save a self-contained HTML page (report, diagram, dashboard) the user can open in a browser. Inline CSS only — scripts and network are blocked.",
     parameters: {
       type: "object",
       properties: {
@@ -307,6 +307,40 @@ const ARG_ALIASES: Record<string, Record<string, string>> = {
   websearch: { q: "query", search: "query", term: "query", keywords: "query", text: "query", max_results: "limit", maxResults: "limit", n: "limit", count: "limit" },
 };
 
+/**
+ * Every argument key that resolves to bash's `cmd`, DERIVED from the alias
+ * table above so the two can never drift. Hand-written lists of `cmd ??
+ * command` were a real bypass: `{"script": "git push"}` normalized to `cmd`
+ * inside execTool but read as the empty string in the approval rails, so the
+ * git gate never fired. Anything that decides on a command must go through
+ * `bashCommandOf`, never re-spell the alias set.
+ */
+const BASH_CMD_KEYS = [
+  "cmd",
+  ...Object.entries(ARG_ALIASES.bash!).filter(([, canon]) => canon === "cmd").map(([alias]) => alias),
+];
+
+/**
+ * The command a bash tool call will ACTUALLY run, resolved through the same
+ * aliases + lenient parse that execTool applies. Returns "" when there is no
+ * command, and null when the arguments cannot be parsed at all (callers must
+ * fail closed on null — the command is unknowable, so no rail can evaluate it).
+ */
+export function bashCommandOf(argsRaw: string): string | null {
+  let a: any;
+  try {
+    a = parseArgsLenient(argsRaw);
+  } catch {
+    return null;
+  }
+  if (!a || typeof a !== "object") return "";
+  for (const k of BASH_CMD_KEYS) {
+    const v = a[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return "";
+}
+
 const NUMERIC_ARGS: Record<string, string[]> = {
   read: ["offset", "limit"],
   bash: ["timeout"],
@@ -421,13 +455,7 @@ export function permissionFor(config: Config, tool: string, argsRaw: string): Pe
     // failed to parse, read as an empty command, missed every deny pattern,
     // and fell through to the default — after which the lenient parser in
     // execTool repaired them and ran the command anyway.
-    let cmd: string | null = null;
-    try {
-      const a = parseArgsLenient(argsRaw);
-      cmd = String(a?.cmd ?? a?.command ?? a?.script ?? "").trim();
-    } catch {
-      cmd = null; // unparseable even leniently
-    }
+    const cmd = bashCommandOf(argsRaw);
     if (cmd === null) {
       // The command is unknowable, so the patterns cannot be evaluated. Fail
       // closed whenever any rule is stricter than the default.
@@ -435,28 +463,164 @@ export function permissionFor(config: Config, tool: string, argsRaw: string): Pe
       return strict ? "ask" : val["*"] ?? null;
     }
     // Split compound shell lines so `echo x && git push` matches "git push*".
-    // Best-effort (not a full shell parse) — same honesty as scanDangerous.
-    const segments = splitShellSegments(cmd);
+    // Also unwrap bash/sh/cmd/powershell -c wrappers so deny rules cannot be
+    // bypassed with `bash -c "git push"`. Best-effort — same honesty as
+    // scanDangerous.
+    const segments = expandShellSegments(cmd);
     let best: PermissionVerdict | null = null;
+    let unmatched = false;
     for (const seg of segments) {
       let hit: PermissionVerdict | null = null;
       for (const [pat, v] of Object.entries(val)) {
         if (pat !== "*" && globRe(pat).test(seg)) { hit = v; break; }
       }
       if (!hit && val["*"]) hit = val["*"];
+      // A segment no rule covers must NOT inherit another segment's verdict —
+      // stricterPermission absorbs null, so `git status && curl evil` used to
+      // return the `git *: allow` from segment one and skip the ask on two.
+      if (!hit) { unmatched = true; continue; }
       best = stricterPermission(best, hit);
     }
+    if (unmatched && best === "allow") return null; // fall back to the mode default
     return best;
   }
   return null;
 }
 
-/** Split on && || ; | and newlines. Trims empties. */
+/** Split on && || ; | & and newlines. Trims empties. */
 export function splitShellSegments(cmd: string): string[] {
   return cmd
-    .split(/(?:&&|\|\||;|\n|(?<!\|)\|(?!\|))/)
+    .split(/(?:&&|\|\||&|;|\n|(?<!\|)\|(?!\|))/)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/**
+ * Pull the payload out of `bash -c "…"`, `cmd /c …`, `powershell -Command …`,
+ * `$()`, backticks. Returns the original segment when no wrapper matches.
+ */
+export function unwrapShellWrapper(seg: string): string[] {
+  const out: string[] = [seg];
+  const tryPush = (inner: string | undefined) => {
+    const t = inner?.trim();
+    if (t) out.push(t);
+  };
+  // bash/sh/zsh -c '…' / "…"
+  let m = seg.match(/\b(?:bash|sh|zsh|dash|fish)\s+(?:-[a-zA-Z]*c|-c)\s+(?:"([^"]*)"|'([^']*)'|(\S+))/i);
+  if (m) tryPush(m[1] ?? m[2] ?? m[3]);
+  // cmd /c …
+  m = seg.match(/\bcmd(?:\.exe)?\s+(?:\/c|\/C)\s+(?:"([^"]*)"|(.+))$/i);
+  if (m) tryPush(m[1] ?? m[2]);
+  // powershell / pwsh -Command / -c  (also bare -Command with unquoted rest)
+  m = seg.match(/\b(?:powershell|pwsh)(?:\.exe)?\b[\s\S]*?(?:-(?:Command|command|c))\s+(?:"([^"]*)"|'([^']*)'|(.+))$/i);
+  if (m) tryPush(m[1] ?? m[2] ?? m[3]);
+  // Encoded PowerShell cannot be inspected — fail closed at the caller by
+  // matching the wrapper segment itself against deny rules (scanDangerous
+  // already blocks -EncodedCommand).
+  // $() and backticks
+  for (const sub of seg.matchAll(/\$\(([^)]*)\)/g)) tryPush(sub[1]);
+  for (const sub of seg.matchAll(/`([^`]+)`/g)) tryPush(sub[1]);
+  return out;
+}
+
+/**
+ * Strip leading wrappers that hide the real verb from permission globs:
+ * `command git push`, `env FOO=1 git push`, `sudo -n git push`, `eval git …`,
+ * `/usr/bin/git push`. Also collapse `git -C path` / `git -c key=val` so
+ * `git -C . push*` still matches a `git push*` deny rule.
+ */
+export function normalizeShellSegment(seg: string): string {
+  let s = seg.trim();
+  // Strip leading env assignments and common prefixes (repeat a few times).
+  for (let i = 0; i < 8; i++) {
+    const next = s
+      .replace(/^["']|["']$/g, "") // after eval "…", strip the payload quotes
+      .replace(/^(?:command|builtin|exec|env|eval|source|nice|nohup|time|ionice)\s+/i, "")
+      .replace(/^sudo(?:\s+-[nEn]*|\s+--\S+)*\s+/i, "")
+      .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|\S+)\s+)+/, "")
+      // Absolute/relative path to a binary → basename (/usr/bin/git, "C:/…/git.exe").
+      // Allow spaces inside the directory portion (Program Files).
+      .replace(
+        /^(?:["'](((?:[A-Za-z]:)?[\\/]|\.\/|\.\.[\\/])[^"']+)["']|(((?:[A-Za-z]:)?[\\/]|\.\/|\.\.[\\/])(?:[^"'&|;]+[\\/])*[^\\/\s"']+?)(?:\.exe)?)(?=\s|$)/i,
+        (_m, quoted, _qInner, bare) => {
+          const p = String(quoted || bare || "").replace(/\.exe$/i, "");
+          return p.split(/[\\/]/).pop() || p;
+        },
+      );
+    if (next === s) break;
+    s = next.trim();
+  }
+  s = s.replace(/^["']|["']$/g, "");
+  // git [-C path | -c key=val | --git-dir=… | --work-tree=…] * → git *
+  s = s.replace(
+    /^\bgit\b((?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+|--namespace=\S+))*\s+)/i,
+    "git ",
+  );
+  return s.trim();
+}
+
+/**
+ * True when a non-`*` permission.bash pattern explicitly allows this call.
+ * Used so `{"*":"allow"}` does NOT suppress soft git rails / ask gates.
+ */
+export function bashHasExplicitAllow(config: Config, argsRaw: string, action: string): boolean {
+  const rules = config.permission;
+  if (!rules) return false;
+  for (const [key, val] of Object.entries(rules)) {
+    if (key !== "bash" && !globRe(key).test("bash")) continue;
+    if (typeof val === "string") return false; // whole-tool allow is not verb-specific
+    const cmd = bashCommandOf(argsRaw);
+    if (!cmd) return false;
+    const verbRe = action === "git push"
+      ? /^git\s+push\b/i
+      : action === "git remote add"
+        ? /^git\s+remote\s+add\b/i
+        : null;
+    if (!verbRe) return false;
+    // EVERY sensitive sub-command must be explicitly allowed on its own.
+    // expandShellSegments is the FLAT enumeration: it splits `&&`/`;`/`|`/`&`,
+    // unwraps `bash -c`/`cmd /c` payloads, AND surfaces `$(…)`/backtick
+    // substitution inner commands as their own segments. A push smuggled
+    // inside `git push origin main $(git push evil)` is therefore a first-class
+    // segment that must match an allow pattern by itself — it can no longer
+    // hide behind the allowed outer part (splitShellSegments alone did not
+    // split on substitution, so the old per-part `.some` accepted the whole).
+    const segs = expandShellSegments(cmd);
+    const sensitive = segs.filter((s) => verbRe.test(s));
+    if (!sensitive.length) return false;
+    return sensitive.every((s) =>
+      Object.entries(val).some(([pat, v]) => pat !== "*" && v === "allow" && globRe(pat).test(s)),
+    );
+  }
+  return false;
+}
+
+/** Segments plus any unwrapped wrapper payloads (one level deep, then recurse once). */
+export function expandShellSegments(cmd: string): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  const queue = splitShellSegments(cmd);
+  while (queue.length) {
+    const seg = queue.shift()!;
+    if (seen.has(seg)) continue;
+    seen.add(seg);
+    out.push(seg);
+    const norm = normalizeShellSegment(seg);
+    if (norm && !seen.has(norm)) {
+      seen.add(norm);
+      out.push(norm);
+    }
+    for (const inner of unwrapShellWrapper(seg)) {
+      if (!seen.has(inner)) {
+        for (const part of splitShellSegments(inner)) {
+          if (!seen.has(part)) queue.push(part);
+          const pn = normalizeShellSegment(part);
+          if (pn && !seen.has(pn)) queue.push(pn);
+        }
+      }
+    }
+  }
+  return out;
 }
 
 const PERM_RANK: Record<PermissionVerdict, number> = { allow: 0, ask: 1, deny: 2 };

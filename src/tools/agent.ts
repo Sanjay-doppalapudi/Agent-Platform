@@ -50,13 +50,17 @@ async function profileArgsFor(name: string | undefined, ctx: ToolCtx): Promise<s
   const defs = discoverAgents(ctx.config);
   const def = defs.find((a) => a.name === String(name).toLowerCase());
   if (!def) {
-    // "name" is a PROFILE (.ap/agents/<name>.md), not a free-form role. Models
-    // routinely invent one ("websearch", "analyze") and then retry the same
-    // call forever, so say what to do instead of just what was wrong.
     throw new ToolError(
       defs.length
         ? `unknown agent profile "${name}" — available: ${defs.map((a) => a.name).join(", ")}. Omit "name" to run a plain subagent.`
         : `no agent profiles are defined, so "name" cannot be used. Drop the "name" argument and put the role in the task itself (e.g. task: "search the web for X and summarize"). Profiles are files: .ap/agents/<name>.md`,
+    );
+  }
+  // Project/claude-repo profiles only after trust — otherwise a cloned repo
+  // plants .ap/agents/evil.md and the model selects it.
+  if (def.source !== "global" && ctx.config.workspaceTrusted !== true) {
+    throw new ToolError(
+      `agent profile "${name}" is from this workspace, which is untrusted — ask the user to trust it before using project agents`,
     );
   }
   return ["--agent", def.name];

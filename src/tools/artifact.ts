@@ -5,7 +5,7 @@
 // traversal is the cautionary tale), the page gets a no-network CSP so
 // model-authored HTML cannot phone home, and the size is capped like every
 // other tool.
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
@@ -13,30 +13,32 @@ import type { ToolCtx } from "./index.ts";
 const MAX_HTML_BYTES = 2 * 1024 * 1024; // 2MB — an artifact is a page, not a dataset
 
 /**
- * Meta CSP for generated pages. `default-src 'none'` blocks fetch/XHR/beacon
- * and every remote subresource, but two egress channels do NOT fall back to
- * default-src and must be named explicitly:
- *   form-action — a cross-origin POST form would otherwise submit freely
- *   base-uri    — a rewritten <base> redirects relative targets
- * Top-level navigation (location.href, window.open, meta refresh) cannot be
- * closed by CSP at all, so inline script is the residual risk: keep pages
- * static unless there is a reason not to.
+ * Meta CSP for generated pages. Scripts and navigation-based exfil are the
+ * residual risk with inline script — so script-src is 'none'. form-action /
+ * base-uri / connect-src / frame-ancestors are named explicitly (they do not
+ * always inherit default-src). Top-level navigation via <meta refresh> is
+ * stripped in withCsp; location.href cannot run without script.
  */
-// connect-src + frame-ancestors named explicitly: connect does not always
-// inherit default-src in older browsers the way we need, and framing an
-// artifact from an attacker page was an easy clickjacking vector.
-const CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; form-action 'none'; base-uri 'none'; connect-src 'none'; frame-ancestors 'none'">`;
+const CSP = `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src data:; font-src data:; form-action 'none'; base-uri 'none'; connect-src 'none'; frame-ancestors 'none'; object-src 'none'">`;
 
 export function slugify(title: string): string {
   const s = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 60);
   return s || "artifact";
 }
 
-/** Inject the CSP into model HTML: after <head>, or wrap when headless. */
+/** Strip meta-refresh, scripts, iframes, and inline event handlers; inject CSP. */
 export function withCsp(html: string): string {
-  if (/<head[^>]*>/i.test(html)) return html.replace(/<head([^>]*)>/i, `<head$1>\n${CSP}`);
-  if (/<html[^>]*>/i.test(html)) return html.replace(/<html([^>]*)>/i, `<html$1>\n<head>${CSP}</head>`);
-  return `<!doctype html>\n<html>\n<head>\n<meta charset="utf-8">\n${CSP}\n</head>\n<body>\n${html}\n</body>\n</html>\n`;
+  let body = html
+    .replace(/<meta\b[^>]*http-equiv\s*=\s*["']?refresh["']?[^>]*>/gi, "<!-- refresh stripped -->")
+    .replace(/<script\b[\s\S]*?<\/script>/gi, "<!-- script stripped -->")
+    .replace(/<script\b[^>]*\/>/gi, "<!-- script stripped -->")
+    .replace(/<iframe\b[\s\S]*?<\/iframe>/gi, "<!-- iframe stripped -->")
+    .replace(/<iframe\b[^>]*\/?>/gi, "<!-- iframe stripped -->")
+    // onload= / onclick= / … — CSP blocks script; strip handlers as defense in depth.
+    .replace(/\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, "");
+  if (/<head[^>]*>/i.test(body)) return body.replace(/<head([^>]*)>/i, `<head$1>\n${CSP}`);
+  if (/<html[^>]*>/i.test(body)) return body.replace(/<html([^>]*)>/i, `<html$1>\n<head>${CSP}</head>`);
+  return `<!doctype html>\n<html>\n<head>\n<meta charset="utf-8">\n${CSP}\n</head>\n<body>\n${body}\n</body>\n</html>\n`;
 }
 
 function stamp(): string {
@@ -45,13 +47,21 @@ function stamp(): string {
   return `${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`;
 }
 
-/** Seconds-granularity stamps collide when two artifacts land in the same
- *  second (parallel tool calls do), and a plain write would silently destroy
- *  the first. Suffix -2, -3, … until the name is free. */
-function uniquePath(dir: string, base: string): string {
-  let p = resolve(dir, `${base}.html`);
-  for (let n = 2; existsSync(p) && n < 1000; n++) p = resolve(dir, `${base}-${n}.html`);
-  return p;
+/** Create exclusively (O_EXCL / wx) so parallel artifact calls never clobber. */
+function uniquePathWrite(dir: string, base: string, content: string): string {
+  for (let n = 1; n < 1000; n++) {
+    const name = n === 1 ? `${base}.html` : `${base}-${n}.html`;
+    const p = resolve(dir, name);
+    try {
+      const fd = openSync(p, "wx");
+      try { writeSync(fd, content); } finally { closeSync(fd); }
+      return p;
+    } catch (e: any) {
+      if (e && (e.code === "EEXIST" || e.code === "EPERM")) continue;
+      throw e;
+    }
+  }
+  throw new ToolError("could not allocate a unique artifact filename");
 }
 
 export async function artifactTool(
@@ -72,8 +82,7 @@ export async function artifactTool(
   }
   const dir = join(ctx.config.dataDir, "artifacts");
   mkdirSync(dir, { recursive: true });
-  const file = uniquePath(dir, `${stamp()}-${slug}`);
+  const file = uniquePathWrite(dir, `${stamp()}-${slug}`, withCsp(args.html));
   if (!file.startsWith(resolve(dir))) throw new ToolError("artifact path escaped the artifacts directory");
-  writeFileSync(file, withCsp(args.html));
   return `artifact saved: ${file}\nopen it in a browser, or /artifacts lists recent ones${ctx.config.light ? "" : " (ap serve exposes /artifacts/<file>)"}`;
 }

@@ -11,10 +11,12 @@
 //      background logs confined to the user's data dir with 7-day pruning
 // Run genuinely untrusted code in a container/VM, not behind these checks.
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { canonicalPath, isInsideRoots, isPrivatePath, isRestrictedDataDirPath, readRoots, resolvePath, truncateMiddle, ToolError } from "./shared.ts";
+import { isBlockedFetchHost, egressPolicyBlock } from "./fetch.ts";
+import { agentChildEnv } from "../trust.ts";
 import type { ToolCtx } from "./index.ts";
 import { relative, isAbsolute } from "node:path";
 
@@ -46,10 +48,62 @@ const DANGEROUS: [RegExp, string][] = [
   [/\bpowershell\b[^&|;]*-(?:enc|encodedcommand)\b/i, "encoded PowerShell"],
   [/\bfind\b[^&|;]*-delete\b/i, "find -delete"],
   [/\b(chmod|chown|chgrp)\b[^&|;]*\s+\/(?:\s|$)/i, "permission change on filesystem root"],
+  // Irreversible git ops — allow optional git global flags (-C path, -c key=val)
+  // before the verb so `git -C . push --force` cannot bypass.
+  [/\bgit\b(?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+|-[^\s-]+))*\s+push\b[^&|;]*--force\b|\bgit\b(?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+|-[^\s-]+))*\s+push\b[^&|;]*\s+-f(?:\s|$)/i, "git force-push"],
+  [/\bgit\b(?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+|-[^\s-]+))*\s+reset\s+--hard\b/i, "git reset --hard"],
+  [/\bgit\b(?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+|-[^\s-]+))*\s+clean\s+-[a-z]*f/i, "git clean -f"],
+  [/\bgit\b(?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+|-[^\s-]+))*\s+remote\s+set-url\b/i, "git remote set-url"],
 ];
 
+/**
+ * Best-effort collapse so path-to-binary / eval / env prefixes don't dodge
+ * pattern rails (`/usr/bin/git push`, `eval git push`, `git.exe push`).
+ * Mirrors normalizeShellSegment in tools/index.ts (kept local to avoid a cycle).
+ */
+function collapseShellVerbs(cmd: string): string {
+  let s = cmd;
+  for (let i = 0; i < 8; i++) {
+    const next = s
+      // Bare `name.exe` with no directory prefix (git.exe, pwsh.exe) — the
+      // natural Windows spelling. The path-basename branch below only strips
+      // `.exe` when a path prefix is present, so `git.exe push --force` kept
+      // its suffix and slipped past both `\bgit\b` rails AND the force-push
+      // hard-block. Strip `.exe` from the token in any command position.
+      .replace(/(^|[\s;&|(`]|\$\()([A-Za-z0-9_.+-]+?)\.exe\b/gi, "$1$2")
+      .replace(/\b(?:command|builtin|exec|env|eval|source|nice|nohup|time|ionice)\s+/gi, "")
+      .replace(/\bsudo(?:\s+-[nEn]*|\s+--\S+)*\s+/gi, "")
+      // Path-to-binary → basename; allow spaces in dirs (Program Files).
+      .replace(
+        /(^|[\s;&|])(?:["'](((?:[A-Za-z]:)?[\\/]|\.\/|\.\.[\\/])[^"']+)["']|(((?:[A-Za-z]:)?[\\/]|\.\/|\.\.[\\/])(?:[^"'&|;]+[\\/])*[^\\/\s"']+?)(?:\.exe)?)(?=\s|$)/gi,
+        (_m, lead, quoted, _qInner, bare) => {
+          const p = String(quoted || bare || "").replace(/\.exe$/i, "");
+          const base = p.split(/[\\/]/).pop() || p;
+          return `${lead ?? ""}${base}`;
+        },
+      );
+    if (next === s) break;
+    s = next;
+  }
+  return s;
+}
+
 export function scanDangerous(cmd: string): string | null {
-  for (const [re, why] of DANGEROUS) if (re.test(cmd)) return why;
+  for (const candidate of new Set([cmd, collapseShellVerbs(cmd)])) {
+    for (const [re, why] of DANGEROUS) if (re.test(candidate)) return why;
+  }
+  return null;
+}
+
+/** Soft git rails: push / remote-add require a permit (or permission.bash allow). */
+export function scanSensitiveGit(cmd: string): string | null {
+  const gitFlags = String.raw`(?:\s+(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+|-[^\s-]+))*`;
+  const pushRe = new RegExp(String.raw`\bgit\b${gitFlags}\s+push\b`, "i");
+  const remoteRe = new RegExp(String.raw`\bgit\b${gitFlags}\s+remote\s+add\b`, "i");
+  for (const candidate of new Set([cmd, collapseShellVerbs(cmd)])) {
+    if (pushRe.test(candidate)) return "git push";
+    if (remoteRe.test(candidate)) return "git remote add";
+  }
   return null;
 }
 
@@ -72,8 +126,116 @@ export function scanDangerous(cmd: string): string | null {
 // reported as outside-the-workspace paths. Real absolute paths worth gating
 // (/etc/passwd, /home/other/.ssh/id_rsa, /workspace/leak, /c/Users/x) all have
 // one. Trade-off: a bare `/tmp` with no child is not flagged.
-const PATH_TOKEN_RE = /(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|(?<![A-Za-z0-9._~/-])\/(?=[^\s"'`;|&<>()*]*\/)|~[\\/]|\$HOME\b|%USERPROFILE%|\$env:USERPROFILE)[^\s"'`;|&<>()*]*/g;
+// $HOMEDRIVE$HOMEPATH and the bare/braced $USERPROFILE bash forms address the
+// Windows home dir too — a redirect to `"$USERPROFILE/.ap/trusted-workspaces.json"`
+// used to extract NO token at all (empty scan → no gate), which let a bash
+// redirect write the trust store. They are listed before $HOME so the longer
+// $HOMEDRIVE… wins over a $HOME prefix match.
+const PATH_TOKEN_RE = /(?:(?<![A-Za-z0-9])[A-Za-z]:[\\/]|(?<![A-Za-z0-9._~/-])\/(?=[^\s"'`;|&<>()*]*\/)|~[\\/]|\$HOMEDRIVE\$HOMEPATH|\$\{?USERPROFILE\}?|\$HOME\b|%USERPROFILE%|\$env:USERPROFILE)[^\s"'`;|&<>()*]*/g;
 const URL_TOKEN_RE = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`;|&<>()*]+/gi;
+/** Windows UNC / device paths: \\server\share, \\?\C:\…, \\.\pipe\… */
+const UNC_TOKEN_RE = /\\\\[^\s"'`;|&<>]*/g;
+
+/** Turn a file:// URL into a local filesystem path, or null if not file:. */
+export function fileUrlToPath(raw: string): string | null {
+  let u: URL;
+  try { u = new URL(raw); } catch { return null; }
+  if (u.protocol !== "file:") return null;
+  // URL.pathname is percent-encoded and uses /; on Windows file:///C:/x → /C:/x
+  let p = decodeURIComponent(u.pathname);
+  if (process.platform === "win32" && /^\/[A-Za-z]:\//.test(p)) p = p.slice(1);
+  // file://hostname/share (UNC) — treat as absolute UNC
+  if (u.hostname && u.hostname !== "localhost" && u.hostname !== "127.0.0.1") {
+    p = `\\\\${u.hostname}${p.replace(/\//g, "\\")}`;
+  }
+  return p.replace(/\//g, process.platform === "win32" ? "\\" : "/");
+}
+
+/** Hostnames/IPs inside a shell command that fetch would refuse (IMDS etc.). */
+export function scanBlockedFetchUrls(cmd: string): string[] {
+  const hits: string[] = [];
+  for (const m of cmd.match(URL_TOKEN_RE) ?? []) {
+    let host = "";
+    try {
+      const u = new URL(m);
+      if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+      host = u.hostname;
+    } catch { continue; }
+    const why = isBlockedFetchHost(host);
+    if (why) hits.push(`${m} (${why})`);
+  }
+  // Bare link-local / IMDS addresses (no scheme) and decimal/hex encodings.
+  if (/\b169\.254\.\d{1,3}\.\d{1,3}\b/.test(cmd)) hits.push("169.254.x.x link-local address");
+  if (/\bfd00:ec2::/i.test(cmd)) hits.push("fd00:ec2:: AWS IMDS");
+  if (/\b0xa9fea9fe\b/i.test(cmd) || /\b2852039166\b/.test(cmd)) hits.push("encoded metadata IP");
+  // curl --resolve / --connect-to can pin a public hostname to IMDS.
+  if (/--(?:resolve|connect-to)\b[^&|;]*169\.254\./i.test(cmd)) {
+    hits.push("curl --resolve/--connect-to to link-local");
+  }
+  // Followed redirects cannot be validated by the bash path scan — refuse -L.
+  if (/\b(?:curl|wget)\b[^&|;]*\s(?:-L|--location)\b/i.test(cmd) && /\bhttps?:\/\//i.test(cmd)) {
+    hits.push("curl/wget -L (redirects bypass host policy — use the fetch tool)");
+  }
+  // wget follows redirects by DEFAULT (unlike curl), so any http(s) wget is
+  // an IMDS redirect risk unless max-redirect is forced to 0.
+  if (/\bwget\b/i.test(cmd) && /\bhttps?:\/\//i.test(cmd) && !/--max-redirect\s*=?\s*0\b/i.test(cmd)) {
+    hits.push("wget follows redirects by default — pass --max-redirect=0 or use the fetch tool");
+  }
+  return [...new Set(hits)].slice(0, 5);
+}
+
+/**
+ * URL tokens in a command that `config.network` would refuse (deny / not in the
+ * allowlist). Best-effort — a scanner cannot see a socket opened by a script,
+ * so this is a speed bump, not the boundary; sandbox:"container" with
+ * --network none is the real egress control. Metadata hosts are handled
+ * separately (scanBlockedFetchUrls) and blocked under every policy.
+ */
+export function scanEgressPolicy(cmd: string, config: ToolCtx["config"]): string[] {
+  const net = config.network;
+  if (!net || net === "allow") return [];
+  const hits: string[] = [];
+  for (const m of cmd.match(URL_TOKEN_RE) ?? []) {
+    try {
+      const u = new URL(m);
+      if (u.protocol !== "http:" && u.protocol !== "https:") continue;
+      const why = egressPolicyBlock(net, u.hostname);
+      if (why) hits.push(`${m} (${why})`);
+    } catch { continue; }
+  }
+  return [...new Set(hits)].slice(0, 5);
+}
+
+let cachedRuntime: string | null | undefined;
+/** docker or podman, whichever is on PATH. Cached; null when neither exists. */
+export function containerRuntime(): string | null {
+  if (cachedRuntime !== undefined) return cachedRuntime;
+  cachedRuntime = Bun.which("docker") ?? Bun.which("podman") ?? null;
+  return cachedRuntime;
+}
+
+/** Build the container argv for sandbox:"container": mount ONLY the workspace,
+ *  egress off unless network:"allow", run the model's command as /bin/sh -c. */
+export function containerArgv(config: ToolCtx["config"], cmd: string, cwd: string): string[] {
+  const runtime = containerRuntime();
+  if (!runtime) {
+    throw new ToolError(
+      "sandbox:\"container\" needs docker or podman on PATH, but neither was found — install one, or set sandbox to \"workspace\".",
+    );
+  }
+  const net = config.network === "allow" ? [] : ["--network", "none"];
+  const image = (typeof config.sandboxImage === "string" && config.sandboxImage.trim()) || "alpine";
+  return [
+    runtime, "run", "--rm", "-i",
+    ...net,
+    // Only the workspace is visible inside the container. dataDir (credentials,
+    // sessions) lives elsewhere and is never mounted → structurally unreachable.
+    "-v", `${cwd}:/workspace`,
+    "-w", "/workspace",
+    "--security-opt", "no-new-privileges",
+    image, "/bin/sh", "-c", cmd,
+  ];
+}
 
 /** Paths a command references outside the readable roots. {priv} = AP-private. */
 export function scanCmdPaths(
@@ -83,18 +245,35 @@ export function scanCmdPaths(
   const roots = readRoots(ctx.config);
   const outside = new Set<string>();
   const priv = new Set<string>();
-  // Strip URLs before matching generic Unix absolute paths: otherwise the
-  // `/path` suffix in `https://example.com/path` looks like a local file.
-  const pathsOnly = cmd.replace(URL_TOKEN_RE, "");
-  for (const m of pathsOnly.match(PATH_TOKEN_RE) ?? []) {
-    let p = m.replace(/^~(?=[\\/])/, homedir()).replace(/^(\$HOME|%USERPROFILE%|\$env:USERPROFILE)/, homedir());
+
+  const consider = (raw: string) => {
+    let p = raw
+      .replace(/^~(?=[\\/])/, homedir())
+      .replace(/^\$HOMEDRIVE\$HOMEPATH/, homedir())
+      .replace(/^(\$HOME\b|%USERPROFILE%|\$env:USERPROFILE|\$\{?USERPROFILE\}?)/, homedir());
     p = resolvePath(p.replace(/[.,:]+$/, ""), ctx.cwd);
     const canonical = canonicalPath(p);
     if (isPrivatePath(p, ctx.config) || isRestrictedDataDirPath(p, ctx.config)) priv.add(p);
     if (isPrivatePath(canonical, ctx.config) || isRestrictedDataDirPath(canonical, ctx.config)) priv.add(canonical);
     if (!isInsideRoots(p, roots)) outside.add(p);
     if (!isInsideRoots(canonical, roots)) outside.add(canonical);
+  };
+
+  // file:// URLs are LOCAL paths — extract them BEFORE stripping other URLs,
+  // otherwise `curl file:///…/credentials.json` slips past the private gate.
+  for (const m of cmd.match(URL_TOKEN_RE) ?? []) {
+    const fp = fileUrlToPath(m);
+    if (fp) consider(fp);
   }
+  // UNC / device paths (not matched by PATH_TOKEN_RE's drive-letter form).
+  for (const m of cmd.match(UNC_TOKEN_RE) ?? []) consider(m);
+
+  // Strip http(s) URLs before matching generic Unix absolute paths: otherwise
+  // the `/path` suffix in `https://example.com/path` looks like a local file.
+  // Keep file: out of the strip set — already handled above.
+  const pathsOnly = cmd.replace(/\bhttps?:\/\/[^\s"'`;|&<>()*]+/gi, "");
+  for (const m of pathsOnly.match(PATH_TOKEN_RE) ?? []) consider(m);
+
   // Relative escapes: ../ chains or a bare `cd ..` step out of the workspace.
   if (/(?:^|[\s"'=(])\.\.[\\/]|\bcd\s+\.\.(?![\w.])/.test(cmd)) outside.add("(relative path escaping the workspace via ..)");
   // When dataDir sits inside the workspace (./.ap), absolute-token scanning
@@ -106,6 +285,12 @@ export function scanCmdPaths(
     const re = new RegExp(`${esc}/(?!memory(?:/|$)|artifacts(?:/|$))[^\\s"'\\\`;|&<>]*`, "i");
     const hit = pathsOnly.replace(/\\/g, "/").match(re);
     if (hit) priv.add(resolvePath(hit[0]!, ctx.cwd));
+  }
+  // Prompt-poison paths under the workspace (.ap/skills, HARNESS.md, …).
+  if (/(?:^|[\s"'=>(])(?:\.ap|\.claude)\/(?:skills|agents|workflows)\b/i.test(pathsOnly.replace(/\\/g, "/"))
+    || /(?:^|[\s"'=>(])(?:AP|AGENTS|HARNESS|CLAUDE)\.md\b/i.test(pathsOnly)
+    || /(?:^|[\s"'=>(])\.ap\/DECISIONS\.md\b/i.test(pathsOnly.replace(/\\/g, "/"))) {
+    priv.add("(prompt-injected project instruction path)");
   }
   return { outside: [...outside].slice(0, 5), priv: [...priv].slice(0, 5) };
 }
@@ -186,6 +371,23 @@ export async function bashTool(
       ctx.warn?.(`dangerous command blocked (${danger}) — logged to ${logPath}; share that log with your model provider`);
       throw new ToolError(`dangerous command blocked: ${danger}. Do not retry it or attempt workarounds.`);
     }
+    // Cloud-metadata / link-local URLs: fetch blocks these; bash must too.
+    const meta = scanBlockedFetchUrls(args.cmd);
+    if (meta.length) {
+      throw new ToolError(
+        `dangerous command blocked: cloud metadata / link-local URL (${meta.join(", ")}). Do not retry it or attempt workarounds.`,
+      );
+    }
+    // Network egress policy (network:"deny" / allowlist). Best-effort in the
+    // in-process guardrail; sandbox:"container" enforces it at the OS level.
+    const egress = scanEgressPolicy(args.cmd, ctx.config);
+    if (egress.length) {
+      throw new ToolError(
+        `denied by network policy: ${egress.join(", ")}. ${ctx.config.network === "deny"
+          ? "Network egress is disabled for this workspace."
+          : "This host is not in the network allowlist."} (sandbox:\"container\" enforces this at the OS level.)`,
+      );
+    }
   }
   if (ctx.config.sandbox !== "off") {
     const { outside, priv } = scanCmdPaths(args.cmd + (args.cwd ? ` ${args.cwd}` : ""), ctx);
@@ -208,8 +410,25 @@ export async function bashTool(
       }
     }
   }
+  // Soft git rails (push / remote add) are enforced in agent.ts so a
+  // permission.bash "allow" rule can still permit them without a prompt.
   const cwd = args.cwd ? resolvePath(args.cwd, ctx.cwd) : ctx.cwd;
   const prefix = shellPrefix(ctx.config.shell);
+
+  // Container sandbox: the command runs inside a throwaway docker/podman
+  // container with only the workspace mounted and egress off by default — a
+  // real OS boundary rather than a pattern scan. Background is not supported
+  // in this mode (the container is torn down with --rm when the call returns).
+  if (ctx.config.sandbox === "container") {
+    if (args.background) {
+      throw new ToolError("background:true is not supported under sandbox:\"container\" — run it in the foreground.");
+    }
+    const argv = containerArgv(ctx.config, args.cmd, cwd);
+    const timeoutMs = Math.min((args.timeout ?? 120) * 1000 || DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
+    // No agentChildEnv here: the container is the isolation, and the marker is
+    // only meaningful to a host `ap` process (which cannot run inside the image).
+    return spawnCaptured(argv, undefined, timeoutMs, ctx.signal);
+  }
 
   if (args.background) {
     const logDir = join(ctx.config.dataDir, "logs");
@@ -219,28 +438,44 @@ export async function bashTool(
     try {
       const cutoff = Date.now() - 7 * 24 * 3600 * 1000;
       for (const f of readdirSync(logDir)) {
-        if (f.startsWith("bg-") && f.endsWith(".log") && statSync(join(logDir, f)).mtimeMs < cutoff) {
+        if (f.startsWith("bg-") && (f.endsWith(".log") || f.endsWith(".sh") || f.endsWith(".ps1") || f.endsWith(".bat") || f.endsWith(".wrap.ps1"))
+          && statSync(join(logDir, f)).mtimeMs < cutoff) {
           rmSync(join(logDir, f), { force: true });
         }
       }
     } catch {}
-    const logFile = join(logDir, `bg-${Date.now()}.log`);
-    // Redirect INSIDE the shell command, not via an inherited fd: on Windows
-    // a raw fd passed through stdio is silently dropped for detached children
-    // (verified with both node:child_process and Bun.spawn — logs stayed 0
-    // bytes), so the shell itself must open the file.
-    const redirected =
-      prefix[0]!.includes("powershell")
-        ? `& { ${args.cmd} } *> "${logFile}"`
-        : prefix[0]!.includes("cmd")
-          ? `( ${args.cmd} ) > "${logFile}" 2>&1`
-          : `{ ${args.cmd} ; } > "${logFile.replace(/\\/g, "/")}" 2>&1`;
-    const child = spawn(prefix[0]!, [...prefix.slice(1), redirected], {
-      cwd,
-      detached: true,
-      stdio: "ignore",
-      windowsHide: true,
-    });
+    const stamp = Date.now();
+    const logFile = join(logDir, `bg-${stamp}.log`);
+    // Never interpolate model cmd into a redirect wrapper — a `}` / `)` in
+    // cmd can close the group and escape the log. Write cmd to a script we
+    // own; the spawn argv only references paths under logDir.
+    const isPs = prefix[0]!.toLowerCase().includes("powershell");
+    const isCmd = /(?:^|[\\/])cmd(?:\.exe)?$/i.test(prefix[0]!);
+    let child;
+    if (isPs) {
+      const body = join(logDir, `bg-${stamp}.ps1`);
+      const wrap = join(logDir, `bg-${stamp}.wrap.ps1`);
+      writeFileSync(body, args.cmd, "utf8");
+      // Wrapper paths are ours; model text never appears in the -File argv.
+      writeFileSync(wrap, `& '${body.replace(/'/g, "''")}' *> '${logFile.replace(/'/g, "''")}'\n`, "utf8");
+      child = spawn(prefix[0]!, ["-NoProfile", "-File", wrap], {
+        cwd, detached: true, stdio: "ignore", windowsHide: true, env: agentChildEnv(),
+      });
+    } else if (isCmd) {
+      const body = join(logDir, `bg-${stamp}.bat`);
+      writeFileSync(body, args.cmd, "utf8");
+      // call "body" > "log" 2>&1 — only our paths in the /c string.
+      child = spawn("cmd", ["/c", `call "${body}" > "${logFile}" 2>&1`], {
+        cwd, detached: true, stdio: "ignore", windowsHide: true, env: agentChildEnv(),
+      });
+    } else {
+      const body = join(logDir, `bg-${stamp}.sh`);
+      writeFileSync(body, args.cmd, "utf8");
+      // bash -c with $1/$2 so model text is never in the -c string.
+      child = spawn(prefix[0]!, ["-c", `. "$1" >"$2" 2>&1`, "_", body, logFile], {
+        cwd, detached: true, stdio: "ignore", windowsHide: true, env: agentChildEnv(),
+      });
+    }
     child.unref();
     // Register it so /ps (and `ap ps`) can find, tail, and kill it later —
     // detached children outlive this process and would otherwise be orphans.
@@ -258,23 +493,38 @@ export async function bashTool(
   }
 
   const timeoutMs = Math.min((args.timeout ?? 120) * 1000 || DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS);
-  const proc = Bun.spawn([...prefix, args.cmd], {
-    cwd,
+  // agentChildEnv marks the child (and everything it spawns) as model-controlled,
+  // so `ap trust accept` refuses there — the file-tool denies around the trust
+  // store are meaningless if the model can just shell out to the CLI.
+  return spawnCaptured([...prefix, args.cmd], cwd, timeoutMs, ctx.signal, agentChildEnv());
+}
+
+/** Spawn a command, cap+return its combined output, honouring timeout + abort. */
+async function spawnCaptured(
+  argv: string[],
+  cwd: string | undefined,
+  timeoutMs: number,
+  signal: AbortSignal,
+  env?: Record<string, string>,
+): Promise<string> {
+  const proc = Bun.spawn(argv, {
+    ...(cwd ? { cwd } : {}),
     stdout: "pipe",
     stderr: "pipe",
     stdin: "ignore",
     windowsHide: true,
+    ...(env ? { env } : {}),
   } as any);
 
   let timedOut = false;
   const timer = setTimeout(() => { timedOut = true; killTree(proc.pid); }, timeoutMs);
   const onAbort = () => killTree(proc.pid);
-  ctx.signal.addEventListener("abort", onAbort, { once: true });
+  signal.addEventListener("abort", onAbort, { once: true });
 
   try {
     const [stdout, stderr, exitCode] = await Promise.all([
-      new Response(proc.stdout).text(),
-      new Response(proc.stderr).text(),
+      readSpawnCapped(proc.stdout, MAX_OUTPUT_BYTES * 4),
+      readSpawnCapped(proc.stderr, MAX_OUTPUT_BYTES * 2),
       proc.exited,
     ]);
     let out = stdout;
@@ -285,6 +535,37 @@ export async function bashTool(
     return out || "(no output)";
   } finally {
     clearTimeout(timer);
-    ctx.signal.removeEventListener("abort", onAbort);
+    signal.removeEventListener("abort", onAbort);
   }
+}
+
+/** Drain a spawn pipe up to `limit` bytes, then kill further reads. */
+async function readSpawnCapped(stream: ReadableStream<Uint8Array> | number | null | undefined, limit: number): Promise<string> {
+  if (!stream || typeof stream === "number") return "";
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      const room = limit - total;
+      if (room <= 0) break;
+      if (value.byteLength <= room) {
+        chunks.push(value);
+        total += value.byteLength;
+      } else {
+        chunks.push(value.subarray(0, room));
+        total += room;
+        break;
+      }
+    }
+  } finally {
+    try { await reader.cancel(); } catch {}
+  }
+  const buf = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) { buf.set(c, at); at += c.byteLength; }
+  return new TextDecoder().decode(buf);
 }

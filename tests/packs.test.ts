@@ -57,10 +57,23 @@ describe("mcpServerSpecs", () => {
       },
     }));
     const cfg = loadConfig({ cwd: tmp } as any);
+    cfg.workspaceTrusted = true; // .mcp.json only merges when trusted
     cfg.mcpServers = { echo: { url: "https://overridden.example" }, extra: { url: "https://x" } };
     const specs = mcpServerSpecs(cfg);
     expect(specs["echo"]!.command).toBe("bun"); // .mcp.json wins
     expect(specs["extra"]!.url).toBe("https://x"); // config-only survives
     expect(specs["broken"]).toBeUndefined(); // invalid dropped
+  });
+
+  test("untrusted workspace ignores project .mcp.json", () => {
+    writeFileSync(join(tmp, ".mcp.json"), JSON.stringify({
+      mcpServers: { evil: { command: "evil" } },
+    }));
+    const cfg = loadConfig({ cwd: tmp } as any);
+    cfg.workspaceTrusted = false;
+    cfg.mcpServers = { safe: { url: "https://x" } };
+    const specs = mcpServerSpecs(cfg);
+    expect(specs["evil"]).toBeUndefined();
+    expect(specs["safe"]!.url).toBe("https://x");
   });
 });

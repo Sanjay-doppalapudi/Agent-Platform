@@ -60,15 +60,18 @@ describe("BOM must not void frontmatter", () => {
   });
 
   test("skills with a BOM are still described", () => {
+    clearSkillCache();
     const cwd = mkdtempSync(join(tmpdir(), "ap-bomskill-"));
     mkdirSync(join(cwd, ".ap", "skills", "demo"), { recursive: true });
     writeFileSync(
       join(cwd, ".ap", "skills", "demo", "SKILL.md"),
       "\uFEFF---\nname: demo\ndescription: a demo skill\n---\nBody here.\n",
     );
-    const s = discoverSkills(loadConfig({ cwd } as any))[0]!;
-    expect(s.name).toBe("demo");
-    expect(s.description).toBe("a demo skill");
+    // Select by name, never by index: discoverSkills sorts alphabetically and
+    // merges ~/.claude/skills, so [0] is whatever the developer happens to
+    // have installed (this failed on any machine with a skill sorting first).
+    const s = discoverSkills(loadConfig({ cwd } as any)).find((x) => x.name === "demo");
+    expect(s?.description).toBe("a demo skill");
   });
 
   test("nested skill folders are discovered", () => {

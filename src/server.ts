@@ -17,10 +17,16 @@ import { loadConfig, resolveProvider, type ResolvedProvider } from "./config.ts"
 import { routeTargets } from "./router.ts";
 import { initMcp } from "./mcp.ts";
 import { runTurn, type AgentEvent } from "./agent.ts";
-import { Session } from "./session.ts";
+import { Session, isValidSessionId } from "./session.ts";
 import type { CliFlags } from "./index.ts";
+import { timingSafeEqual } from "node:crypto";
+import { resolve as resolvePath } from "node:path";
 
 const VERSION = "0.1.15";
+
+function resolveCwd(p: string): string {
+  return resolvePath(p);
+}
 
 interface Live {
   session: Session;
@@ -46,10 +52,15 @@ export async function serveMain(flags: CliFlags) {
   const loopback = isLoopbackHost(hostname);
 
   let token = flags.token ?? process.env.AP_SERVE_TOKEN ?? "";
-  if (!loopback && !token) {
+  // Always require a bearer token — even on loopback. Local malware / other
+  // users on the same machine could otherwise spend the API key and run tools.
+  if (!token) {
     token = crypto.randomUUID().replace(/-/g, "");
-    console.error(`⚠ non-loopback bind (${hostname}) — generated serve token (pass Authorization: Bearer <token>)`);
+    console.error(`⚠ ap serve requires a bearer token — generated one (pass Authorization: Bearer <token>)`);
     console.error(`  AP_SERVE_TOKEN=${token}`);
+  }
+  if (!loopback && !flags.token && !process.env.AP_SERVE_TOKEN) {
+    // already generated above; keep the non-loopback note for operators
   }
 
   // MCP binds to the server's base cwd once per process; per-session cwds
@@ -70,13 +81,14 @@ export async function serveMain(flags: CliFlags) {
   const json = (data: unknown, status = 200) =>
     new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
 
-  /** Bearer header, or ?token= for EventSource clients that cannot set headers. */
+  /** Bearer header only — ?token= leaked into logs, Referer, and process lists. */
   const authorized = (req: Request): boolean => {
-    if (!token) return true;
+    if (!token) return false;
     const h = req.headers.get("authorization") ?? "";
-    if (h === `Bearer ${token}`) return true;
+    const want = `Bearer ${token}`;
+    if (h.length !== want.length) return false;
     try {
-      return new URL(req.url).searchParams.get("token") === token;
+      return timingSafeEqual(Buffer.from(h), Buffer.from(want));
     } catch {
       return false;
     }
@@ -129,7 +141,7 @@ export async function serveMain(flags: CliFlags) {
       }
 
       if (!authorized(req)) {
-        return json({ error: "unauthorized — pass Authorization: Bearer <token> (or ?token=)" }, 401);
+        return json({ error: "unauthorized — pass Authorization: Bearer <token>" }, 401);
       }
 
       if (req.method === "GET" && path === "/event") return sse(null);
@@ -152,7 +164,7 @@ export async function serveMain(flags: CliFlags) {
           headers: {
             "content-type": "text/html; charset=utf-8",
             "content-security-policy":
-              "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:; font-src data:; form-action 'none'; base-uri 'none'; connect-src 'none'; frame-ancestors 'none'",
+              "default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src data:; font-src data:; form-action 'none'; base-uri 'none'; connect-src 'none'; frame-ancestors 'none'; object-src 'none'",
             "x-content-type-options": "nosniff",
           },
         });
@@ -160,7 +172,15 @@ export async function serveMain(flags: CliFlags) {
 
       if (req.method === "POST" && path === "/session") {
         const body = (await req.json().catch(() => ({}))) as { cwd?: string; title?: string };
-        const cwd = body.cwd ?? baseConfig.cwd;
+        // Remote cwd is a sandbox escape (workspace roots follow session cwd).
+        // Sessions always use the server's configured cwd; pass a different
+        // root via `ap serve --cwd` on the CLI instead.
+        if (body.cwd != null && String(body.cwd).trim() !== "" && resolveCwd(body.cwd) !== resolveCwd(baseConfig.cwd)) {
+          return json({
+            error: "cwd is not accepted over ap serve — start the server with --cwd, or use the local CLI",
+          }, 400);
+        }
+        const cwd = baseConfig.cwd;
         const session = Session.create(baseConfig.dataDir, {
           cwd,
           model: primary.model,
@@ -173,6 +193,7 @@ export async function serveMain(flags: CliFlags) {
       const m = path.match(/^\/session\/([^/]+)(?:\/(message|events|messages))?$/);
       if (m) {
         const id = m[1]!;
+        if (!isValidSessionId(id)) return json({ error: "session not found" }, 404);
         const sub = m[2];
         let live = sessions.get(id);
         if (!live) {
@@ -214,6 +235,13 @@ export async function serveMain(flags: CliFlags) {
             allowOutside?: boolean;
           };
           if (!body.text) return json({ error: "text required" }, 400);
+          // allowOutside / system from the HTTP body are privilege escalations —
+          // ignore them. Operators who need them should use `ap run` locally.
+          if (body.allowOutside || body.system) {
+            return json({
+              error: "allowOutside and system are not accepted over ap serve — use the local CLI",
+            }, 400);
+          }
 
           const config = { ...baseConfig, cwd: live.cwd, sessionId: id };
           if (config.permissions === "prompt") config.permissions = "yolo"; // interactive-only
@@ -221,7 +249,7 @@ export async function serveMain(flags: CliFlags) {
             ? (body.model ? provider.map((p) => ({ ...p, model: body.model! })) : provider)
             : (body.model ? { ...provider, model: body.model } : provider);
           const extra = body.response_format ? { response_format: body.response_format } : undefined;
-          const permit = body.allowOutside ? async () => true : undefined; // undefined → auto-deny
+          const permit = undefined; // auto-deny outside sandbox
 
           if (live.closed) return json({ error: "session closed" }, 410);
           const run = live.chain.then(async () => {
@@ -231,7 +259,7 @@ export async function serveMain(flags: CliFlags) {
             const text = await runTurn(
               config, prov, live!.session, body.text!,
               broadcast(id), ctrl.signal,
-              { extra, systemOverride: body.system, permit },
+              { extra, permit },
             );
             return text;
           });
@@ -249,9 +277,7 @@ export async function serveMain(flags: CliFlags) {
     },
   });
 
-  const authNote = token
-    ? ` · auth required (Authorization: Bearer …)`
-    : ` · auth off (loopback only)`;
+  const authNote = ` · auth required (Authorization: Bearer …)`;
   console.log(`AP serving on http://${hostname === "0.0.0.0" ? "127.0.0.1" : hostname}:${server.port}${authNote} · ${primary.name}/${primary.model}`);
   return server;
 }

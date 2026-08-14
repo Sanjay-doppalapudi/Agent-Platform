@@ -50,14 +50,24 @@ export interface FlowApi {
 /** Injectable for tests: what one agent() call actually does. */
 export type FlowRunner = (task: string, opts: { cwd: string; timeoutMs: number; extraArgs: string[] }) => Promise<string>;
 
-/** Resolve a flow name to a file: explicit path > .ap/workflows > dataDir. */
+/** Resolve a flow name to a file: explicit path > .ap/workflows > dataDir.
+ *  Project `.ap/workflows` requires workspace trust (same tier as hooks — the
+ *  file is arbitrary local code). dataDir workflows are user-global. */
 export function resolveFlowPath(config: Config, name: string): string | null {
   if (/\.(ts|js|mjs)$/.test(name)) {
     const p = resolve(config.cwd, name);
-    return existsSync(p) ? p : null;
+    if (!existsSync(p)) return null;
+    // Explicit paths under the project tree still need trust.
+    const projectRoot = resolve(config.cwd);
+    const underProject = p === projectRoot || p.startsWith(projectRoot + "\\") || p.startsWith(projectRoot + "/");
+    const underData = p.startsWith(resolve(config.dataDir) + "\\") || p.startsWith(resolve(config.dataDir) + "/");
+    if (underProject && !underData && config.workspaceTrusted !== true) return null;
+    return p;
   }
   if (!/^[\w-]+$/.test(name)) return null; // names are identifiers, not paths
-  for (const dir of [join(config.cwd, ".ap", "workflows"), join(config.dataDir, "workflows")]) {
+  const dirs = [join(config.dataDir, "workflows")];
+  if (config.workspaceTrusted === true) dirs.unshift(join(config.cwd, ".ap", "workflows"));
+  for (const dir of dirs) {
     for (const ext of ["ts", "js", "mjs"]) {
       const p = join(dir, `${name}.${ext}`);
       if (existsSync(p)) return p;
@@ -70,7 +80,9 @@ export function resolveFlowPath(config: Config, name: string): string | null {
 export function listFlows(config: Config): { name: string; path: string }[] {
   const seen = new Set<string>();
   const out: { name: string; path: string }[] = [];
-  for (const dir of [join(config.cwd, ".ap", "workflows"), join(config.dataDir, "workflows")]) {
+  const dirs = [join(config.dataDir, "workflows")];
+  if (config.workspaceTrusted === true) dirs.unshift(join(config.cwd, ".ap", "workflows"));
+  for (const dir of dirs) {
     try {
       for (const f of readdirSync(dir).sort()) {
         const m = f.match(/^([\w-]+)\.(ts|js|mjs)$/);
@@ -184,8 +196,11 @@ export async function runFlow(
 ): Promise<unknown> {
   const path = resolveFlowPath(config, nameOrPath);
   if (!path) {
+    const trustHint = config.workspaceTrusted === true
+      ? ""
+      : " (project .ap/workflows requires `ap trust accept`)";
     throw new Error(
-      `no workflow "${nameOrPath}" — looked for .ap/workflows/${nameOrPath}.{ts,js,mjs} and ${join(config.dataDir, "workflows")}`,
+      `no workflow "${nameOrPath}" — looked for .ap/workflows/${nameOrPath}.{ts,js,mjs} and ${join(config.dataDir, "workflows")}${trustHint}`,
     );
   }
   const mod = await import(pathToFileURL(path).href);

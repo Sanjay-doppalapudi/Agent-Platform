@@ -1,6 +1,7 @@
 // websearch tool: DuckDuckGo's HTML endpoint via plain fetch — no browser,
 // no API key, zero deps. Returns "N. Title \n URL \n snippet" blocks.
 import { anySignal, ToolError } from "./shared.ts";
+import { egressPolicyBlock } from "./fetch.ts";
 import type { ToolCtx } from "./index.ts";
 
 const decodeEntities = (s: string) =>
@@ -28,6 +29,8 @@ export async function websearchTool(
   if (typeof args.query !== "string" || !args.query.trim()) {
     throw new ToolError('websearch requires {query:"search terms"}');
   }
+  const egress = egressPolicyBlock(ctx.config.network, "html.duckduckgo.com");
+  if (egress) throw new ToolError(`websearch blocked: ${egress}`);
   const limit = Math.min(Math.max(Number(args.limit) || 8, 1), 20);
   let res: Response;
   try {

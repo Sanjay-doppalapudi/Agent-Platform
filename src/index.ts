@@ -2,7 +2,7 @@
 // Entry point: parse argv, dispatch to a mode via lazy import so the hot path
 // (startup → first prompt) loads only what it needs.
 
-const VERSION = "0.1.15";
+const VERSION = "0.1.16";
 
 export interface CliFlags {
   provider?: string;
@@ -23,6 +23,8 @@ export interface CliFlags {
   prompt?: string;
   system?: string;
   noSandbox?: boolean;
+  /** --sandbox <workspace|container|off> — overrides config for this run. */
+  sandbox?: string;
   allowOutside?: boolean;
   light?: boolean;
   check?: string[];
@@ -55,6 +57,7 @@ function parseArgs(argv: string[]): { cmd: string; flags: CliFlags; rest: string
       case "--prompt": case "-p": flags.prompt = argv[++i]; break;
       case "--system": flags.system = argv[++i]; break;
       case "--no-sandbox": flags.noSandbox = true; break;
+      case "--sandbox": flags.sandbox = argv[++i]; break;
       case "--allow-outside": flags.allowOutside = true; break;
       case "--light": flags.light = true; break;
       case "--check": (flags.check ??= []).push(argv[++i]!); break;
@@ -174,14 +177,37 @@ const HELP_TOPICS: Record<string, string> = {
 
   serve: `ap serve [--port 4141] [--host 127.0.0.1] [--token secret] — HTTP server
 
-  Binds 127.0.0.1 by default (not 0.0.0.0). Non-loopback hosts require a
-  bearer token (--token or AP_SERVE_TOKEN); one is generated and printed if
-  you omit it. Pass Authorization: Bearer <token>, or ?token= for SSE.
+  Always requires a bearer token (Authorization: Bearer …). If --token /
+  AP_SERVE_TOKEN is omitted, one is generated and printed to stderr.
+  Binds 127.0.0.1 by default (not 0.0.0.0). allowOutside/system are not
+  accepted over HTTP.
 
   POST /session {cwd?}                    → {id}
   POST /session/:id/message {text, ...}   → blocks → {text, messages}
   GET  /session/:id/events                → SSE stream of AgentEvents
   GET  /health · GET /session/:id/messages · DELETE /session/:id`,
+
+  trust: `ap trust [status|accept|revoke|list] — workspace trust
+
+  Untrusted projects only get a safe allowlist (ignore/theme/…). hooks,
+  mcpServers, sandbox, bashGuard, permission(s), providers, dataDir, and
+  .mcp.json require \`ap trust accept\` first.`,
+
+  sandbox: `sandbox modes (config "sandbox" or --sandbox <mode>)
+
+  workspace  in-process guardrail (default): path containment + bash pattern
+             scan. File containment holds; bash is host code execution, so the
+             scan is best-effort — a determined model can escape it.
+  container  each bash runs in a throwaway docker/podman container: only the
+             workspace is mounted (-v cwd:/workspace), egress off unless
+             network:"allow", --security-opt no-new-privileges. A real OS
+             boundary. Needs docker or podman on PATH. Image = "sandboxImage"
+             (default alpine). background:true is not supported here.
+  off        no file gates (also --no-sandbox).
+
+  Egress policy: config "network" — "allow" (default) | "deny" | ["host",…]
+  (suffix-match allowlist), applied to fetch/websearch/bash. Metadata hosts are
+  blocked under every policy. OS-enforced (--network none) in container mode.`,
 
   acp: `ap acp — Agent Client Protocol server (Zed and other ACP editors)
 
@@ -220,7 +246,8 @@ Usage:
   ap loop -p "goal"        loop work→verify until the goal is verifiably done
   ap flow <name> [args…]   run a workflow script (.ap/workflows/<name>.ts)
   ap watch                 live view of running ap sessions, agents and flows
-  ap serve [--port 4141]   HTTP server (loopback + optional bearer token)
+  ap serve [--port 4141]   HTTP server (always requires a bearer token)
+  ap trust [accept|…]      allow privileged project config / .mcp.json
   ap acp                   ACP agent for editors (Zed): stdio, modes, permissions
   ap skills [add|remove]   list/install SKILL.md packs (skills.sh compatible)
   ap mcp [add|call|...]    connect MCP servers — their tools become agent tools
@@ -256,6 +283,7 @@ Loop mode:
 
 Safety:
   --no-sandbox         disable the workspace write-sandbox this invocation
+  --sandbox <mode>     workspace (default) | container (bash in docker/podman) | off
   --allow-outside      headless runs: allow writes outside the workspace
 
 Output:
@@ -465,6 +493,10 @@ Example:  ap mcp add fs bun x @modelcontextprotocol/server-filesystem .`);
       }
       cur.mcpServers = { ...cur.mcpServers, [name]: spec };
       writeFileSync(file, JSON.stringify(cur, null, 2) + "\n");
+      if (!project) {
+        const { lockConfigFile } = await import("./creds.ts");
+        lockConfigFile(config.dataDir);
+      }
       console.log(`added mcp server "${name}" → ${file}\nverify with: ap mcp list`);
       break;
     }
@@ -724,6 +756,66 @@ Example:  ap mcp add fs bun x @modelcontextprotocol/server-filesystem .`);
     if (!key) { console.error("no key entered"); process.exit(1); }
     setKey(config.dataDir, prov, key);
     console.log(`stored key for "${prov}" in ${config.dataDir}\\credentials.json (user-only access)`);
+    break;
+  }
+  case "trust": {
+    const { loadConfig } = await import("./config.ts");
+    const {
+      trustWorkspace, untrustWorkspace, listTrustedWorkspaces,
+      isWorkspaceTrusted, trustRoot,
+    } = await import("./trust.ts");
+    const config = loadConfig(flags);
+    const sub = rest[0] ?? "status";
+    if (sub === "list") {
+      const rows = listTrustedWorkspaces(config.dataDir);
+      console.log(rows.length ? rows.join("\n") : "(none)");
+      break;
+    }
+    if (sub === "revoke" || sub === "untrust") {
+      const ok = untrustWorkspace(config.dataDir, config.cwd);
+      console.log(ok ? `revoked trust for ${trustRoot(config.cwd)}` : `not trusted: ${trustRoot(config.cwd)}`);
+      break;
+    }
+    if (sub === "accept" || sub === "add") {
+      // Trust is the one decision the agent must never make for itself: it
+      // turns project ap.config.json / .mcp.json into code that runs on the
+      // next launch. Refuse in AP-spawned processes and outside a TTY, then
+      // take a TYPED confirmation naming the resolved root (trust applies to
+      // the git root, not cwd, and --cwd can retarget it).
+      const { assertTrustGrantAllowed } = await import("./trust.ts");
+      try {
+        assertTrustGrantAllowed();
+      } catch (e) {
+        console.error((e as Error).message);
+        process.exit(1);
+      }
+      const root = trustRoot(config.cwd);
+      console.log(
+        `About to TRUST: ${root}\n` +
+        `That directory's ap.config.json may then set hooks (shell commands run every turn),\n` +
+        `mcpServers (processes spawned before the first turn), sandbox, bashGuard and permission —\n` +
+        `and its .mcp.json will be loaded. Only accept this for code you wrote or reviewed.`,
+      );
+      const { createInterface } = await import("node:readline");
+      const rl = createInterface({ input: process.stdin, output: process.stdout });
+      const answer: string = await new Promise((res) => rl.question(`Type "trust" to confirm: `, res));
+      rl.close();
+      if (answer.trim().toLowerCase() !== "trust") {
+        console.log("aborted — nothing was trusted");
+        break;
+      }
+      const stored = trustWorkspace(config.dataDir, config.cwd);
+      console.log(`trusted ${stored}\nProject ap.config.json hooks/MCP/sandbox and .mcp.json will now apply.`);
+      break;
+    }
+    if (sub === "status") {
+      const ok = isWorkspaceTrusted(config.dataDir, config.cwd);
+      console.log(`${ok ? "trusted" : "untrusted"}: ${trustRoot(config.cwd)}`);
+      if (!ok) console.log("Project hooks/MCP/sandbox overrides are ignored. Run: ap trust accept");
+      break;
+    }
+    console.error("usage: ap trust [status|accept|revoke|list]");
+    process.exit(1);
     break;
   }
   case "resume": {

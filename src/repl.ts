@@ -10,6 +10,7 @@ import { runTurn, type AgentEvent } from "./agent.ts";
 import { Checkpoints } from "./checkpoint.ts";
 import { allIgnores, readRoots, sandboxRoots } from "./tools/shared.ts";
 import { getTool, type PermitFn } from "./tools/index.ts";
+import { shellPrefix } from "./tools/bash.ts";
 import { listSubagents } from "./tools/agent.ts";
 import { buildSystemPrompt, clearPromptSnapshots } from "./prompt.ts";
 import { readLine, type SlashCommand } from "./input.ts";
@@ -325,7 +326,7 @@ export async function replMain(flags: CliFlags) {
     console.log(`${cyan("◆")} ${bold("AP")} ${dim("·")} ${provider.name}/${provider.model}${config.light ? dim(" · light") : ""}`);
   }
   console.log(dim(`  cwd ${config.cwd}`));
-  console.log(dim(`  session ${session.id} · type / for commands · ctrl+o details · ctrl+c abort`));
+  console.log(dim(`  session ${session.id} · type / for commands · ! for shell · ctrl+o details · ctrl+c abort`));
 
   let lastUsage: Usage | undefined;
   let verbose = true;
@@ -589,10 +590,13 @@ export async function replMain(flags: CliFlags) {
   // is awaited before the first turn so the tool list is complete + frozen.
   const mcpReady = initMcp(config, (m) => console.log(yellow(`⚠ ${m}`)));
 
-  // Custom slash commands: .ap/commands/<name>.md in the repo or data dir.
+  // Custom slash commands: dataDir always; project `.ap/commands` only when trusted
+  // (command bodies inject into the next user turn — same trust tier as project notes).
   const customCommands = new Map<string, { file: string; desc: string }>();
   if (!config.light) {
-    for (const dir of [join(config.cwd, ".ap", "commands"), join(config.dataDir, "commands")]) {
+    const cmdDirs = [join(config.dataDir, "commands")];
+    if (config.workspaceTrusted === true) cmdDirs.unshift(join(config.cwd, ".ap", "commands"));
+    for (const dir of cmdDirs) {
       try {
         for (const f of readdirSync(dir)) {
           if (!f.endsWith(".md")) continue;
@@ -793,6 +797,28 @@ export async function replMain(flags: CliFlags) {
     if (input === null || input === undefined) exit(0);
     if (!input) continue;
     history.push(input);
+
+    // `!cmd` — shell escape: run the rest in YOUR shell instead of sending it
+    // to the model. This is the user's own terminal (like `!` in psql/gdb), so
+    // it bypasses the agent guardrails and runs with your privileges. Output
+    // streams straight through (interactive commands work).
+    if (input.startsWith("!")) {
+      const shellCmd = input.slice(1).trim();
+      if (!shellCmd) {
+        console.log(dim("usage: !<command> — runs in your shell (bypasses the agent; not sandboxed)"));
+        continue;
+      }
+      try {
+        const proc = Bun.spawn([...shellPrefix(config.shell), shellCmd], {
+          cwd: config.cwd, stdin: "inherit", stdout: "inherit", stderr: "inherit", windowsHide: true,
+        } as any);
+        const code = await proc.exited;
+        if (code !== 0) console.log(dim(`[exit ${code}]`));
+      } catch (e) {
+        console.log(dim(`shell error: ${(e as Error).message}`));
+      }
+      continue;
+    }
 
     if (input.startsWith("/") || input.startsWith(":")) {
       const [cmd, ...rest] = input.slice(1).split(/\s+/);

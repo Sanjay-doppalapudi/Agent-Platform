@@ -7,7 +7,7 @@ Minimal, fast coding agent CLI. OpenAI-compatible providers only (OpenCode Go, O
 ```
 ◆ AP · opencode-go/minimax-m3
   cwd C:\projects\my-app
-  session 20260801...-ab3d · type / for commands · ctrl+o details · ctrl+c abort
+  session 20260801...-ab3d · type / for commands · ! for shell · ctrl+o details · ctrl+c abort
 
 code › fix the failing date test
 ✻ reasoning streams dim…
@@ -78,6 +78,7 @@ ap acp                  # ACP agent for editors (Zed): stdio, modes, permissions
 ap serve [--port 4141]  # HTTP server mode (sessions + SSE)
 ap models [query]       # search the models.dev catalog (context + pricing)
 ap auth <provider>      # store an API key
+ap trust [accept|…]     # trust this workspace's ap.config.json / .mcp.json (interactive)
 ap resume / ap sessions # pick a session to resume / list + full-text search
 ap share [id]           # export a transcript as one self-contained HTML file
 ap ps [tail|kill]       # background processes from bash background:true
@@ -102,7 +103,7 @@ Targets use each provider's endpoint from models.dev unless `providers` config o
 
 ### REPL
 
-Type `/` to open the command menu (↑/↓ navigate, Enter/Tab select, Esc close; ↑/↓ recall history otherwise):
+Type `/` to open the command menu (↑/↓ navigate, Enter/Tab select, Esc close; ↑/↓ recall history otherwise). A line starting with **`!`** is a **shell escape** — the rest runs in your own shell (like `!` in psql/gdb) instead of going to the model, streaming output straight through; it's your terminal, so it bypasses the agent guardrails.
 
 | Command | Effect |
 |---|---|
@@ -119,7 +120,7 @@ Type `/` to open the command menu (↑/↓ navigate, Enter/Tab select, Esc close
 | `/tasks` `/flow` `/artifacts` `/watch` | background subagent tasks · workflows (`list`/`last`/`<name>`) · artifacts · live process viewer |
 | `/compact` `/archives` `/restore-context` `/rewind` | Compaction 2.0 — summarize, list archives, reinject an archive note, drop last N user turns |
 | `/agent` `/agents` | apply/clear a named agent profile · list subagents this session |
-| `/mcp` `/skills` `/sandbox` | MCP status/`reload` · skills/`reload` · sandbox state/toggle |
+| `/mcp` `/skills` `/sandbox` | MCP status/`reload` · skills/`reload` · sandbox state/toggle (`workspace`/`container`/`off`) |
 | `/share` `/system` `/context` | export HTML transcript · inspect system prompt · token usage |
 | `/exit` | quit (prints the session id + resume command) |
 
@@ -161,8 +162,10 @@ Project `ap.config.json` (walked up from cwd; legacy `harness.config.json` accep
 | `mode` | `"code"` | `"plan"` = read-only tools |
 | `permissions` | `"yolo"` | `"prompt"` asks before every mutating tool in the REPL |
 | `permission` | — | per-tool rules, evaluated first: `{"fetch": "deny", "edit": "ask", "mcp_*": "ask", "bash": {"git push*": "ask", "*": "allow"}}` — tool keys and bash command patterns take `*` globs; **compound bash** (`cmd1 && cmd2`, pipes, `;`) takes the **strictest** segment verdict; `deny` blocks outright, `ask` uses the interactive permit (auto-denied headless), `allow` skips only the ask gate (sandbox + bashGuard still apply) |
-| `sandbox` | `"workspace"` | writes/edits outside the workspace (+ data dir + session plans) need a y/N/always permission; `"off"` or `--no-sandbox` disables; headless denies unless `--allow-outside` |
-| `bashGuard` | `"on"` | dangerous shell patterns (recursive absolute deletes, format, registry edits, curl\|bash, …) are auto-blocked, warned, and logged to `<dataDir>/blocked-commands.jsonl` for provider feedback |
+| `sandbox` | `"workspace"` | `"workspace"`: writes/edits outside the workspace (+ data dir + session plans) need a y/N/always permission (headless denies unless `--allow-outside`). `"container"` (`--sandbox container`): each `bash` runs in a throwaway docker/podman container — only the workspace mounted, egress off by default — a **real** OS boundary. `"off"` / `--no-sandbox`: no file gates |
+| `sandboxImage` | `"alpine"` | image for `sandbox:"container"` (the command runs as `/bin/sh -c`, workspace at `/workspace`) — set to match your stack (`node:20`, …) |
+| `network` | `"allow"` | egress policy for `fetch`/`websearch`/`bash` URL tokens: `"deny"` blocks all, a `string[]` is a suffix-match hostname allowlist. Cloud-metadata / link-local hosts are blocked under **every** policy. Best-effort in `workspace` mode; OS-enforced (`--network none`) in `container` mode |
+| `bashGuard` | `"on"` | dangerous shell patterns (recursive absolute deletes, format, registry edits, curl\|bash, force-push incl. `git.exe`, …) are auto-blocked, warned, and logged to `<dataDir>/blocked-commands.jsonl` for provider feedback |
 | `streamIdleSeconds` | 90 | stalled provider streams abort and retry once instead of hanging (0 = off) |
 | `maxIterations` | 40 | agent loop guard |
 | `contextBudgetChars` | 400000 | old tool results elided beyond this |
@@ -189,7 +192,17 @@ Project `ap.config.json` (walked up from cwd; legacy `harness.config.json` accep
 
 ## Sandbox
 
-**Reads are scoped**: the agent can freely read the workspace plus the skills/memory/commands dirs and its session plans folder. Reading anywhere else — other projects, your home dir, `ls`/`cat` via bash included (best-effort path scan, `..` escapes counted) — triggers the interactive `[y/N/a=always]` permission and is denied headlessly unless `--allow-outside`. **AP-private data is never accessible**: session transcripts, checkpoints, `credentials.json`, and `config.json` are hard-denied even if you'd approve — only `sandbox:"off"` lifts that. **Mutations are jailed** the same way: `write`/`edit` outside the workspace/data dir/plans folder need permission. Dangerous bash patterns are **auto-blocked** (never prompted) with a ⚠ warning and a JSONL log entry you can share with your model provider. This is a guardrail, not a VM: pattern scanning is best-effort, symlinks aren't resolved, and network egress isn't restricted. `/sandbox` shows state (writable + readable roots); `/sandbox off` disables per-session.
+**Reads are scoped**: the agent can freely read the workspace plus the skills/memory/commands dirs and its session plans folder. Reading anywhere else — other projects, your home dir, `ls`/`cat` via bash included (best-effort path scan, `..` escapes counted, **symlink targets resolved**) — triggers the interactive `[y/N/a=always]` permission and is denied headlessly unless `--allow-outside`.
+
+**AP-private data is never accessible** — hard-denied for read *and* write even if you'd approve (only `sandbox:"off"` lifts it): session transcripts, checkpoints, `credentials.json`, `config.json`, and the workspace-trust store.
+
+**Mutations are jailed** the same way: `write`/`edit` outside the workspace/data-dir/plans folder need permission. Files that grant **code execution on the next run** are hard-denied outright — `ap.config.json` / `harness.config.json` / `.mcp.json` (in any directory), `.git/hooks/`, `.ap|.claude/commands/` — as are the prompt-note files (`AP.md`/`AGENTS.md`/`.ap/skills|agents|workflows`/`DECISIONS.md`). On Windows, trailing dots/spaces are normalized so `ap.config.json.` can't dodge those name checks.
+
+**Dangerous bash patterns are auto-blocked** (never prompted) with a ⚠ warning and a JSONL log entry you can share with your provider.
+
+**The honest boundary**: `sandbox:"workspace"` is a guardrail, not a VM — file-path containment holds well, but `bash` is host code execution, so the pattern scan is best-effort and a determined model can escape it (e.g. a path decoded at runtime). For genuinely untrusted code, **`sandbox:"container"`** (`--sandbox container`) runs every `bash` inside a throwaway docker/podman container with only the workspace mounted and egress off by default — a real OS boundary. `/sandbox` shows state (writable + readable roots) and toggles per-session.
+
+**Workspace trust.** A project's `ap.config.json` and `.mcp.json` can execute code (hooks, MCP servers) and relax guardrails, so they take effect only once you trust the workspace. Until then an untrusted project gets a safe allowlist (`theme`/`ignore`/…) — its `hooks`/`mcpServers`/`sandbox`/`network`/`permission`/`provider` overrides, project skills/agents/workflows/commands, and `.mcp.json` are ignored, with a warning listing what was stripped. Run **`ap trust accept`** (interactive only — it names the resolved git root before you confirm; the agent can never grant trust for itself). `ap trust status|revoke|list` manage it.
 
 Weaker-model tolerance: tool names (`search`→grep, `create`→write, …) and argument names (`file_path`, `command`, `query`, …) are alias-normalized, malformed JSON args get auto-repaired, and edits retry with CRLF and trailing-whitespace normalization — each recovery saves a full model round-trip.
 
@@ -203,7 +216,7 @@ Weaker-model tolerance: tool names (`search`→grep, `create`→write, …) and 
 - **Custom slash commands**: `.ap/commands/<name>.md` → `/name args` with `$ARGS` substitution.
 - **`@file` mentions**: `@src/foo.ts` inlines the file (8KB cap). Bracketed paste is supported in the REPL input.
 - **Hooks**: `hooks.preBash/preWrite/preEdit` (nonzero exit blocks) and `hooks.afterEdit` (e.g. `bun x tsc --noEmit` — failures fed back, max 2 rounds/turn; `AP_ARGS.paths` lists touched files). Compaction hooks: `preCompact`/`postCompact`. Lifecycle: `hooks.onDone` / `hooks.onError` — shell (`AP_EVENT`/`AP_PAYLOAD`) or `http(s)://` JSON POST.
-- **Web + outline tools**: `websearch` (DuckDuckGo HTML, no key) · `fetch` (HTTP(S) text, 50KB; cloud-metadata / link-local / IPv6-embedded SSRF blocked; `render:true` disabled) · `todo` · **`repomap`** (ripgrep outline of defs under a path — full profile only).
+- **Web + outline tools**: `websearch` (DuckDuckGo HTML, no key) · `fetch` (HTTP(S) text, 50KB; cloud-metadata / link-local / IPv6-embedded SSRF blocked; `render:true` disabled) · `todo` · **`repomap`** (ripgrep outline of defs under a path — full profile only). `websearch` and `fetch` both honour the `network` egress policy (`deny` / allowlist).
 - **Real git**:
   - **`git.autoBranch: true`**: first mutating tool call on a protected branch → create/switch to `ap/<slug>` (never touches main uninvited).
   - **`/commit [--staged] [--sign] [message]`**: stage + commit to your real history with a drafted message and `y/N` confirm — **never pushes**. Protected branches offer an `ap/<slug>` switch first.
@@ -297,7 +310,7 @@ Then open the Agent Panel and pick **AP**. Provider/model flags carry through: `
 
 ## Security
 
-AP executes model-chosen commands on your machine by design — treat it like handing a very fast intern a terminal. The layered guardrails (write **and read** scoped sandbox with interactive permits, hard-denied AP-private data, dangerous-command blocklist, plan mode's structurally read-only schema set, required-argument schema validation, timeouts, output caps, 7-day background-log retention) plus the full threat model and vulnerability-reporting process are documented in [SECURITY.md](SECURITY.md). The honest boundary: this is a guardrail, not a VM — run genuinely untrusted code in a container. Zero runtime dependencies, and npm releases are published from GitHub Actions with **provenance attestation**.
+AP executes model-chosen commands on your machine by design — treat it like handing a very fast intern a terminal. The layered guardrails (write **and read** scoped sandbox with interactive permits and resolved symlink targets, hard-denied AP-private data + privileged config + trust store, workspace trust for project config/MCP, dangerous-command blocklist, a configurable `network` egress policy, plan mode's structurally read-only schema set, required-argument schema validation, timeouts, output caps, 7-day background-log retention) plus the full threat model and vulnerability-reporting process are documented in [SECURITY.md](SECURITY.md). The honest boundary: `sandbox:"workspace"` is a guardrail, not a VM — for genuinely untrusted code use the built-in **`sandbox:"container"`** mode (bash in docker/podman, workspace-only mount, egress off). Zero runtime dependencies, and npm releases are published from GitHub Actions with **provenance attestation**.
 
 ## Why it's fast
 

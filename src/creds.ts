@@ -35,12 +35,12 @@ export function setKey(dataDir: string, provider: string, key: string) {
   const obj = { ...load(dataDir), [provider]: key };
   mkdirSync(dirname(p), { recursive: true });
   writeFileSync(p, JSON.stringify(obj, null, 2) + "\n");
-  lockDown(p);
+  lockDown(p, true);
   cache = obj;
 }
 
-/** Restrict the file to the current user (best-effort). */
-function lockDown(p: string) {
+/** Restrict a sensitive file to the current user. When required=true, throw on failure. */
+export function lockDown(p: string, required = false) {
   try {
     if (process.platform === "win32") {
       // Fully-qualified DOMAIN\user — a bare name is ambiguous when the
@@ -48,9 +48,27 @@ function lockDown(p: string) {
       const user = process.env.USERNAME || process.env.USER || "";
       const domain = process.env.USERDOMAIN || "";
       const account = domain ? `${domain}\\${user}` : user;
-      if (user) Bun.spawnSync(["icacls", p, "/inheritance:r", "/grant:r", `${account}:F`], { stdout: "ignore", stderr: "ignore" });
+      if (!user) {
+        if (required) throw new Error("cannot lock down credentials: USERNAME unset");
+        return;
+      }
+      const r = Bun.spawnSync(["icacls", p, "/inheritance:r", "/grant:r", `${account}:F`], {
+        stdout: "ignore",
+        stderr: "pipe",
+      });
+      if (r.exitCode !== 0 && required) {
+        throw new Error(`icacls failed for ${p}: ${(r.stderr?.toString() || "").trim() || `exit ${r.exitCode}`}`);
+      }
     } else {
       chmodSync(p, 0o600);
     }
-  } catch {}
+  } catch (e) {
+    if (required) throw e;
+  }
+}
+
+/** ACL-lock config.json when it may hold secrets (mcp env, inline apiKey). */
+export function lockConfigFile(dataDir: string) {
+  const p = join(dataDir, "config.json");
+  if (existsSync(p)) lockDown(p, false);
 }

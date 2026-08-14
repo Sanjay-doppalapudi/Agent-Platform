@@ -2,11 +2,15 @@
 // memory pool (via --git-common-dir); unrelated projects under the same
 // dataDir do not. Soft-reads top-level legacy <dataDir>/memory/*.md when the
 // keyed dir is empty so existing notes are not orphaned.
+//
+// Memory cards are model-writable and injected into the system prompt — so
+// every write AND every read is schema-gated (Title / User wanted / Why).
 import { createHash } from "node:crypto";
 import { mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve } from "node:path";
 
 const MEMORY_CHAR_CAP = 2000;
+const MEMORY_CARD_MAX_BYTES = 800;
 
 /** Stable directory segment for a workspace. */
 export function repoMemoryKey(cwd: string): string {
@@ -45,7 +49,42 @@ function gitCommonDir(cwd: string): string | null {
   }
 }
 
-/** Concatenated saved memories, capped. Prefer keyed dir; fall back to flat. */
+/**
+ * A valid memory card is exactly three lines (Title / User wanted / Why).
+ * Reject free-form Markdown that would poison the system prompt.
+ */
+export function isValidMemoryCard(content: string): boolean {
+  const lines = content
+    .replace(/^\uFEFF/, "")
+    .split(/\r\n|\r|\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length !== 3) return false;
+  if (!/^title:\s+.+/i.test(lines[0]!)) return false;
+  if (!/^user wanted:\s+.+/i.test(lines[1]!)) return false;
+  if (!/^why \(guess\):\s+.+/i.test(lines[2]!)) return false;
+  const body = lines.join("\n");
+  if (body.length > MEMORY_CARD_MAX_BYTES) return false;
+  if (
+    /<<<|>>>|system prompt|ignore (all )?previous|disregard (all )?(prior|previous)|you are now|new instructions?:|<\/?\s*(system|assistant|user)\b/i
+      .test(body)
+  ) return false;
+  return true;
+}
+
+/** Normalize a card to the canonical three-line form, or null if invalid. */
+export function normalizeMemoryCard(content: string): string | null {
+  if (!isValidMemoryCard(content)) return null;
+  const lines = content
+    .replace(/^\uFEFF/, "")
+    .split(/\r\n|\r|\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  return `${lines[0]}\n${lines[1]}\n${lines[2]}\n`;
+}
+
+/** Concatenated saved memories, capped. Prefer keyed dir; fall back to flat.
+ *  Invalid / free-form cards are skipped (defense against prompt poisoning). */
 export function readMemories(memDir: string, legacyDir?: string): string {
   let out = readMdDir(memDir);
   if (!out && legacyDir && legacyDir !== memDir) {
@@ -67,7 +106,11 @@ function readMdDir(dir: string, topLevelOnly = false): string {
           continue;
         }
       }
-      out += readFileSync(p, "utf8").trim() + "\n---\n";
+      let raw = "";
+      try { raw = readFileSync(p, "utf8"); } catch { continue; }
+      const card = normalizeMemoryCard(raw);
+      if (!card) continue;
+      out += card.trim() + "\n---\n";
       if (out.length > MEMORY_CHAR_CAP) {
         return out.slice(0, MEMORY_CHAR_CAP) + "\n[more memories truncated]";
       }
@@ -88,4 +131,4 @@ export function legacyMemoryDir(dataDir: string): string {
   return join(dataDir, "memory");
 }
 
-export { MEMORY_CHAR_CAP };
+export { MEMORY_CHAR_CAP, MEMORY_CARD_MAX_BYTES };

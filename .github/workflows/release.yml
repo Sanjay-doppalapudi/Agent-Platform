@@ -28,9 +28,17 @@ jobs:
       - run: bun x tsc --noEmit
       - run: bun test tests
       - run: bun run dist
+      # Publish SHA-256 checksums for the install scripts to verify.
+      - name: checksums
+        run: |
+          cd dist
+          sha256sum ap-* > checksums.txt
+          cat checksums.txt
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/*
+          files: |
+            dist/*
+            dist/checksums.txt
           generate_release_notes: true
       # Auto-publish to npm when the NPM_TOKEN repo secret is configured
       # (granular access token with 2FA bypass). Without the secret this

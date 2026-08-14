@@ -2,7 +2,16 @@
 // trailing line is ignored on load.
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { randomUUID } from "node:crypto";
 import type { Msg } from "./provider.ts";
+
+/** Session ids must be path-safe. New sessions use CSPRNG UUIDs; legacy
+ *  stamp-xxxx ids remain loadable. */
+export function isValidSessionId(id: string): boolean {
+  if (!id || id.length > 80) return false;
+  if (id.includes("..") || /[\\/\0]/.test(id)) return false;
+  return /^[A-Za-z0-9._-]+$/.test(id);
+}
 
 /**
  * Guarantee every stored tool_call carries a valid stringified JSON OBJECT.
@@ -100,14 +109,16 @@ export class Session {
   }
 
   static create(dataDir: string, meta: SessionMeta): Session {
-    const stamp = new Date().toISOString().replace(/[-:T]/g, "").slice(0, 14);
-    const id = `${stamp}-${Math.random().toString(36).slice(2, 6)}`;
+    // CSPRNG UUID — the previous Math.random() 4-char suffix was ~20 bits and
+    // guessable when the timestamp second was known (serve IDOR).
+    const id = randomUUID();
     const file = join(Session.dir(dataDir), `${id}.jsonl`);
     appendFileSync(file, JSON.stringify({ t: "meta", ...meta }) + "\n");
     return new Session(id, file);
   }
 
   static load(dataDir: string, id: string): Session {
+    if (!isValidSessionId(id)) throw new Error(`session not found: ${id}`);
     const file = join(Session.dir(dataDir), `${id}.jsonl`);
     if (!existsSync(file)) throw new Error(`session not found: ${id}`);
     const s = new Session(id, file);
@@ -163,6 +174,7 @@ export class Session {
   }
 
   static delete(dataDir: string, id: string) {
+    if (!isValidSessionId(id)) return;
     const file = join(Session.dir(dataDir), `${id}.jsonl`);
     if (existsSync(file)) unlinkSync(file);
   }
@@ -202,6 +214,7 @@ export class Session {
   /** Set/clear the session title by appending a meta line (load last-wins).
    *  Empty title clears it. Returns the loaded session or throws if missing. */
   static rename(dataDir: string, id: string, title: string): Session {
+    if (!isValidSessionId(id)) throw new Error(`session not found: ${id}`);
     const s = Session.load(dataDir, id);
     const cleaned = title.replace(/\s+/g, " ").trim().slice(0, 120);
     const meta: SessionMeta = {

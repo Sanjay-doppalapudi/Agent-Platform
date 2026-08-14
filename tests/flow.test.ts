@@ -7,15 +7,18 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { boundedParallel, extractJson, resolveFlowPath, runFlow, validateShape } from "../src/flow.ts";
 
-function tmpConfig() {
+function tmpConfig(trusted = true) {
   const cwd = mkdtempSync(join(tmpdir(), "ap-flow-cwd-"));
   const dataDir = mkdtempSync(join(tmpdir(), "ap-flow-data-"));
-  return { config: { cwd, dataDir } as any, cleanup: () => { rmSync(cwd, { recursive: true, force: true }); rmSync(dataDir, { recursive: true, force: true }); } };
+  return {
+    config: { cwd, dataDir, workspaceTrusted: trusted } as any,
+    cleanup: () => { rmSync(cwd, { recursive: true, force: true }); rmSync(dataDir, { recursive: true, force: true }); },
+  };
 }
 
 describe("resolveFlowPath", () => {
   test(".ap/workflows/<name>.ts wins; names must be identifiers", () => {
-    const { config, cleanup } = tmpConfig();
+    const { config, cleanup } = tmpConfig(true);
     try {
       const dir = join(config.cwd, ".ap", "workflows");
       mkdirSync(dir, { recursive: true });
@@ -28,8 +31,22 @@ describe("resolveFlowPath", () => {
     } finally { cleanup(); }
   });
 
-  test("explicit .ts path is allowed (it is the user typing a path)", () => {
-    const { config, cleanup } = tmpConfig();
+  test("project workflows require workspace trust", () => {
+    const { config, cleanup } = tmpConfig(false);
+    try {
+      const dir = join(config.cwd, ".ap", "workflows");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "audit.ts"), "export default async () => 1");
+      expect(resolveFlowPath(config, "audit")).toBeNull();
+      expect(resolveFlowPath(config, "audit.ts")).toBeNull();
+      const p = join(config.cwd, "myflow.ts");
+      writeFileSync(p, "export default async () => 1");
+      expect(resolveFlowPath(config, "myflow.ts")).toBeNull();
+    } finally { cleanup(); }
+  });
+
+  test("explicit .ts path is allowed when trusted (it is the user typing a path)", () => {
+    const { config, cleanup } = tmpConfig(true);
     try {
       const p = join(config.cwd, "myflow.ts");
       writeFileSync(p, "export default async () => 1");

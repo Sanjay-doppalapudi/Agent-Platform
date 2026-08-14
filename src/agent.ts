@@ -6,7 +6,8 @@ import { ProviderError, streamChat, type Msg } from "./provider.ts";
 import { streamRouted } from "./router.ts";
 import { buildSystemPrompt } from "./prompt.ts";
 import type { Session } from "./session.ts";
-import { autoDenyPermit, execTool, getTool, isParallelSafe, permissionFor, resolveToolName, toolSchemasFor, type PermitFn } from "./tools/index.ts";
+import { autoDenyPermit, bashCommandOf, bashHasExplicitAllow, execTool, getTool, isParallelSafe, permissionFor, resolveToolName, toolSchemasFor, type PermitFn } from "./tools/index.ts";
+import { scanSensitiveGit } from "./tools/bash.ts";
 import { maybeAutoBranch } from "./git.ts";
 import type { Usage } from "./stream.ts";
 
@@ -242,6 +243,20 @@ export async function runTurn(
             action: `run ${canonical}`,
             detail: `${canonical} ${tc.function.arguments.slice(0, 120)}`,
           });
+        }
+        // Soft git rails: push / remote-add need approval unless an EXPLICIT
+        // non-* permission.bash allow matched (a bare `"*": "allow"` must not
+        // suppress the ask). Irreversible git ops are blocked in scanDangerous.
+        if (allowed && canonical === "bash" && config.bashGuard !== "off") {
+          // bashCommandOf resolves the SAME argument aliases execTool applies
+          // (cmd / command / script). Re-spelling that set here was a bypass:
+          // {"script": "git push"} read as "" and skipped the rail entirely.
+          const cmd = bashCommandOf(tc.function.arguments) ?? "";
+          const gitSens = scanSensitiveGit(cmd);
+          if (gitSens && !bashHasExplicitAllow(config, tc.function.arguments, gitSens)) {
+            allowed = await ctx.permit({ action: gitSens, detail: cmd.slice(0, 200) });
+            if (!allowed) denial = `denied: ${gitSens} requires user approval (use /pr, or allow via permission.bash)`;
+          }
         }
         if (!allowed) {
           r = { output: denial, error: true };

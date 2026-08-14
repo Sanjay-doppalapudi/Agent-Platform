@@ -34,6 +34,11 @@ describe("withCsp", () => {
   test("the CSP blocks all network directions", () => {
     expect(withCsp("<p>x</p>")).toContain("default-src 'none'");
   });
+  test("strips iframe and inline event handlers", () => {
+    const out = withCsp(`<img src="x" onerror="alert(1)"><iframe src="https://e"></iframe>`);
+    expect(out).toContain("<!-- iframe stripped -->");
+    expect(out).not.toMatch(/\sonerror=/i);
+  });
 });
 
 describe("artifactTool", () => {

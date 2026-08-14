@@ -6,6 +6,7 @@ import { describe, expect, test } from "bun:test";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { trustWorkspace, untrustWorkspace } from "../src/trust.ts";
 
 const FIXTURE = join(import.meta.dir, "fixtures", "mcp-endless.ts");
 
@@ -15,16 +16,22 @@ function listTools(mode: string, timeoutMs: number) {
   writeFileSync(join(cwd, ".mcp.json"), JSON.stringify({
     mcpServers: { endless: { command: process.execPath, args: ["run", FIXTURE, mode] } },
   }));
+  // Project .mcp.json only loads for trusted workspaces.
+  trustWorkspace("", cwd);
   const started = Date.now();
-  const p = Bun.spawnSync(
-    [process.execPath, "run", join(import.meta.dir, "..", "src", "index.ts"), "mcp", "list", "--cwd", cwd],
-    { stdout: "pipe", stderr: "pipe", timeout: timeoutMs },
-  );
-  return {
-    out: (p.stdout?.toString() ?? "") + (p.stderr?.toString() ?? ""),
-    ms: Date.now() - started,
-    exitCode: p.exitCode,
-  };
+  try {
+    const p = Bun.spawnSync(
+      [process.execPath, "run", join(import.meta.dir, "..", "src", "index.ts"), "mcp", "list", "--cwd", cwd],
+      { stdout: "pipe", stderr: "pipe", timeout: timeoutMs },
+    );
+    return {
+      out: (p.stdout?.toString() ?? "") + (p.stderr?.toString() ?? ""),
+      ms: Date.now() - started,
+      exitCode: p.exitCode,
+    };
+  } finally {
+    untrustWorkspace("", cwd);
+  }
 }
 
 describe("MCP tools/list pagination terminates", () => {

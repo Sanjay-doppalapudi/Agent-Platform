@@ -8,6 +8,7 @@ import { isIP } from "node:net";
 import { Readable } from "node:stream";
 import { anySignal, truncateMiddle, ToolError } from "./shared.ts";
 import type { ToolCtx } from "./index.ts";
+import type { Config } from "../config.ts";
 
 const MAX_BYTES = 50_000;
 const MAX_REDIRECTS = 10;
@@ -112,6 +113,27 @@ export function assertFetchUrlAllowed(raw: string): URL {
   return u;
 }
 
+/**
+ * Egress verdict for a host under `config.network`. Metadata / link-local hosts
+ * are ALWAYS blocked (that is a fixed safety floor, not policy). Beyond that:
+ * undefined | "allow" permits everything; "deny" blocks all; a string[] is a
+ * suffix-match hostname allowlist (`example.com` also matches `api.example.com`).
+ * Returns null when allowed, else a human reason. Best-effort in-process; the
+ * container sandbox enforces the same policy at the OS level (--network none).
+ */
+export function egressPolicyBlock(net: Config["network"], host: string): string | null {
+  const meta = isBlockedFetchHost(host);
+  if (meta) return meta;
+  if (!net || net === "allow") return null;
+  const h = host.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+  if (net === "deny") return `network egress is disabled (network:"deny") — host ${host}`;
+  const ok = net.some((e) => {
+    const entry = e.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
+    return h === entry || h.endsWith("." + entry);
+  });
+  return ok ? null : `host not in network allowlist (network policy): ${host}`;
+}
+
 /** Resolve once, validate the address, then pin the HTTP connection to it. */
 async function resolveAllowedAddress(hostname: string): Promise<{ address: string; family: number }> {
   const host = hostname.toLowerCase().replace(/^\[|\]$/g, "").replace(/\.$/, "");
@@ -190,7 +212,10 @@ export async function fetchTool(
   if (typeof args.url !== "string") {
     throw new ToolError("fetch requires {url} starting with http(s)://");
   }
-  const url = assertFetchUrlAllowed(args.url).href;
+  const u = assertFetchUrlAllowed(args.url);
+  const egress = egressPolicyBlock(ctx.config.network, u.hostname);
+  if (egress) throw new ToolError(`fetch blocked: ${egress}`);
+  const url = u.href;
   if (args.render) {
     throw new ToolError(
       "fetch render:true is temporarily disabled: the system browser cannot enforce the hostname policy across redirects and socket connections. Use plain fetch or a sandboxed browser.",
